@@ -1,7 +1,7 @@
 {
   "name": "codex-usage-details",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A desktop dashboard for official Codex API and subscription usage.",
   "author": "Fukaki-Ato",
   "license": "MIT",
@@ -61,7 +61,7 @@
       "icon": "build/electron-default.png"
     },
     "nsis": {
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "Codex Usage Details",
       "perMachine": false
