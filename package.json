@@ -20,7 +20,7 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "tsc --noEmit && vite build",
     "package": "npm run build && electron-builder --win",
-    "test": "node --test tests/*.test.cjs",
+    "test": "node scripts/test.cjs",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "start": "electron ."
