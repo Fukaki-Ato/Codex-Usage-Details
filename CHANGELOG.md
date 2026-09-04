@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-09-02
+
+- Use the clear ICO asset for the Windows application and desktop shortcut icon.
+
 ## [0.1.1] - 2026-09-02
 
 - Recreate the desktop shortcut when the application is reinstalled or updated.
