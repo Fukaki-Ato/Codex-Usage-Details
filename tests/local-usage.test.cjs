@@ -58,6 +58,15 @@ test('uses hourly rows for today and ignores malformed events', () => {
   assert.equal(data.modelHourly.length, 1)
 })
 
+test('accepts OpenAI o-series models but ignores other providers', () => {
+  const data = parseSessionText([
+    event('o3-mini', '2026-08-30T11:30:00Z', { input_tokens: 20, output_tokens: 5 }),
+    event('claude-3-7-sonnet', '2026-08-30T11:30:00Z', { input_tokens: 999, output_tokens: 999 }),
+  ].join('\n'), { range: 'today', now: new Date('2026-08-30T12:00:00Z') })
+
+  assert.deepEqual(data.models.map((row) => row.model), ['o3-mini'])
+})
+
 test('fills missing daily model buckets with zeroes', () => {
   const models = localRowsToModels({
     modelDaily: [{ model: 'gpt-5.6-terra', date: '2026-08-29', requestCount: 3, cachedTokens: 10, uncachedTokens: 20, cacheWriteTokens: 0, outputTokens: 5 }],

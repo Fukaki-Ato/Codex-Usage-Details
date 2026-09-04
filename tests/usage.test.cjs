@@ -32,6 +32,21 @@ test('falls back to input token difference when uncached count is omitted', () =
   assert.equal(snapshot.models[0].buckets[0].uncachedTokens, 75)
 })
 
+test('keeps OpenAI model ids and excludes other providers', () => {
+  const snapshot = normalizeApiBuckets([
+    {
+      start_time: 1700000000,
+      results: [
+        { model: 'o3', num_model_requests: 1, input_tokens: 12 },
+        { model: 'ft:gpt-4o-mini:org-example', num_model_requests: 1, input_tokens: 8 },
+        { model: 'claude-3-7-sonnet', num_model_requests: 9, input_tokens: 999 },
+      ],
+    },
+  ], { start: 0, end: 0 })
+
+  assert.deepEqual(snapshot.models.map((model) => model.model), ['o3', 'ft:gpt-4o-mini:org-example'])
+})
+
 test('normalizes subscription rate limit windows without fabricating history', () => {
   const details = normalizeSubscriptionPayload({
     plan_type: 'pro',

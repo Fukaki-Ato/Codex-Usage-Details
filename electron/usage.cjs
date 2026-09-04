@@ -1,5 +1,6 @@
 const API_USAGE_URL = 'https://api.openai.com/v1/organization/usage/completions'
 const CHATGPT_BASE_URL = 'https://chatgpt.com/backend-api'
+const { isOpenAiModel } = require('./models.cjs')
 const usageSnapshotCache = new Map()
 const subscriptionPayloadCache = new Map()
 
@@ -122,7 +123,7 @@ function normalizeApiBuckets(rawBuckets, window, range) {
     const key = hourly ? `${formatLocalDate(date)}T${String(date.getHours()).padStart(2, '0')}` : formatLocalDate(date)
     timestamps.set(key, timestamp)
     for (const result of Array.isArray(bucket.results) ? bucket.results : []) {
-      const model = typeof result.model === 'string' && /^gpt-/i.test(result.model) ? result.model : ''
+      const model = isOpenAiModel(result.model) ? result.model.trim() : ''
       if (!model) continue
       if (!modelMaps.has(model)) modelMaps.set(model, new Map())
       const map = modelMaps.get(model)

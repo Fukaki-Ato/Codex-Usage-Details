@@ -1,6 +1,7 @@
 const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
+const { isOpenAiModel } = require('./models.cjs')
 
 const MAX_SESSION_FILES = 10_000
 const MAX_SESSION_FILE_BYTES = 64 * 1024 * 1024
@@ -96,7 +97,7 @@ function parseSessionText(text, { range = '7d', now = new Date() } = {}) {
     const payload = event?.payload || {}
     if (event?.type === 'world_state') {
       const model = payload?.state?.collaboration_mode?.model
-      currentModel = typeof model === 'string' && model.startsWith('gpt-') ? model : ''
+      currentModel = isOpenAiModel(model) ? model.trim() : ''
       continue
     }
     if (event?.type !== 'event_msg' || payload.type !== 'token_count' || !currentModel) continue
