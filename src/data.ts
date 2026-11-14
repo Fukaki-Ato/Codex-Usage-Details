@@ -114,8 +114,8 @@ export function createDemoSnapshot(
         accountId: 'demo-account',
         userId: null,
         windows: [
-          { label: '5 小时额度', usedPercent: 15, limitWindowSeconds: 18_000, resetsAt: Date.now() + 1.8 * 60 * 60 * 1000, resetAfterSeconds: 6_480 },
-          { label: '周额度', usedPercent: 28, limitWindowSeconds: 604_800, resetsAt: Date.now() + 5.2 * 24 * 60 * 60 * 1000, resetAfterSeconds: 449_280 },
+          { id: 'primary', label: '5 小时额度', usedPercent: 15, limitWindowSeconds: 18_000, resetsAt: Date.now() + 1.8 * 60 * 60 * 1000, resetAfterSeconds: 6_480 },
+          { id: 'secondary', label: '周额度', usedPercent: 28, limitWindowSeconds: 604_800, resetsAt: Date.now() + 5.2 * 24 * 60 * 60 * 1000, resetAfterSeconds: 449_280 },
         ],
       },
     } : {}),

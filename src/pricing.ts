@@ -45,40 +45,10 @@ const pricingTable: Record<string, ApiModelPricing> = {
   'gpt-3.5-turbo-0125': { input: 0.5, cachedInput: 0, output: 1.5 },
 }
 
-const pricingAliases: Array<[RegExp, string]> = [
-  [/^gpt-5\.6-sol(?:-|$)/, 'gpt-5.6-sol'],
-  [/^gpt-5\.6-terra(?:-|$)/, 'gpt-5.6-terra'],
-  [/^gpt-5\.6-luna(?:-|$)/, 'gpt-5.6-luna'],
-  [/^gpt-5\.5-pro(?:-|$)/, 'gpt-5.5-pro'],
-  [/^gpt-5\.5(?:-|$)/, 'gpt-5.5'],
-  [/^gpt-5\.4-pro(?:-|$)/, 'gpt-5.4-pro'],
-  [/^gpt-5\.4-mini(?:-|$)/, 'gpt-5.4-mini'],
-  [/^gpt-5\.4(?:-|$)/, 'gpt-5.4'],
-  [/^gpt-5\.3-codex(?:-|$)/, 'gpt-5.3-codex'],
-  [/^gpt-5\.2-pro(?:-|$)/, 'gpt-5.2-pro'],
-  [/^gpt-5\.2(?:-|$)/, 'gpt-5.2'],
-  [/^gpt-5\.1(?:-|$)/, 'gpt-5.1'],
-  [/^gpt-5-mini(?:-|$)/, 'gpt-5-mini'],
-  [/^gpt-5-nano(?:-|$)/, 'gpt-5-nano'],
-  [/^gpt-5-pro(?:-|$)/, 'gpt-5-pro'],
-  [/^gpt-5(?:-|$)/, 'gpt-5'],
-  [/^gpt-4\.1-mini(?:-|$)/, 'gpt-4.1-mini'],
-  [/^gpt-4\.1-nano(?:-|$)/, 'gpt-4.1-nano'],
-  [/^gpt-4\.1(?:-|$)/, 'gpt-4.1'],
-  [/^gpt-4o-mini(?:-|$)/, 'gpt-4o-mini'],
-  [/^gpt-4o(?:-|$)/, 'gpt-4o'],
-  [/^o4-mini(?:-|$)/, 'o4-mini'],
-  [/^o3-mini(?:-|$)/, 'o3-mini'],
-  [/^o3-pro(?:-|$)/, 'o3-pro'],
-  [/^o3(?:-|$)/, 'o3'],
-  [/^o1-pro(?:-|$)/, 'o1-pro'],
-  [/^o1(?:-|$)/, 'o1'],
-]
-
 export function pricingForModel(model: string) {
-  if (pricingTable[model]) return pricingTable[model]
-  const alias = pricingAliases.find(([pattern]) => pattern.test(model))
-  return alias ? pricingTable[alias[1]] : null
+  if (Object.hasOwn(pricingTable, model)) return pricingTable[model]
+  const snapshot = model.match(/^(.+)-\d{4}-\d{2}-\d{2}$/)
+  return snapshot && Object.hasOwn(pricingTable, snapshot[1]) ? pricingTable[snapshot[1]] : null
 }
 
 export function estimateModelCost(model: ModelUsage) {
@@ -94,7 +64,7 @@ export function estimateModelCost(model: ModelUsage) {
   if (totals.cacheWrite > 0 && pricing.cacheWrite === undefined) return null
   return {
     pricing,
-    amount: (totals.uncached * pricing.input + totals.cached * pricing.cachedInput + totals.cacheWrite * (pricing.cacheWrite || 0) + (totals.output + totals.reasoning) * pricing.output) / 1_000_000,
+    amount: (totals.uncached * pricing.input + totals.cached * pricing.cachedInput + totals.cacheWrite * (pricing.cacheWrite || 0) + totals.output * pricing.output) / 1_000_000,
   }
 }
 

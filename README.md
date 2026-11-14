@@ -8,6 +8,11 @@
 
 已实现：
 
+- 请求与订阅视图显示数据取得时间，缓存有效期为 60 秒，桌面端每分钟自动刷新
+- 模型汇总表支持排序与选择，长时间范围自动按周、月或季度汇总
+- Token 输出已包含推理；费用缺价、日志错误与扫描限制会单独提示
+- 本机日志通过工作线程流式读取，未变化文件复用解析结果
+
 - API 用量与订阅用量两个独立视图
 - 多账户列表与账户切换入口
 - 24 小时、7 天、30 天、全部四种时间范围
@@ -27,7 +32,7 @@
 
 ## 开发
 
-环境要求：Node.js 20 或更高版本。Windows 桌面开发不要求安装 Rust。
+环境要求：Node.js 22.12 或更高版本。Windows 桌面开发不要求安装 Rust。
 
 ```bash
 npm install
@@ -47,14 +52,14 @@ npm run build
 npm run package
 ```
 
-开发环境需要 Node.js 20 或更高版本。普通用户不需要安装 Node.js，直接使用 GitHub Releases 中的 Windows 安装包即可。
+开发环境需要 Node.js 22.12 或更高版本。普通用户不需要安装 Node.js，直接使用 GitHub Releases 中的 Windows 安装包即可。
 
 ## 安装与使用
 
 1. 从 GitHub Releases 下载最新的 Windows 安装包。
 2. 安装并启动 `Codex Usage Details`。
 3. 在“管理账户”中添加组织管理员 API Key，或使用官方 OAuth 登录订阅账户。
-4. 订阅账户如果使用了非默认的 Codex 数据目录，在账户管理中为该账户选择对应目录。
+4. 在账户管理中为订阅账户选择独立使用的 Codex 数据目录，并确认日志归属。未选择目录时仍显示官方额度，不统计本机模型记录。旧版本使用默认目录的账户也需要执行此步骤；已明确配置的目录会保留。
 
 API 用量接口要求组织管理员权限。订阅额度登录使用官方 OAuth，但订阅接口不是公开稳定 API，接口变更时需要等待适配更新。
 
@@ -90,7 +95,7 @@ API 用量和订阅用量使用独立的 `UsageProvider` 数据契约，避免�
 - 官方订阅用量：复用官方开源 Codex CLI 当前的 OAuth 参数、PKCE 本地回调和 Token 刷新方式，读取 ChatGPT 后端的 `/wham/usage`。
 - 订阅接口边界：`/wham/usage` 当前返回实时套餐额度窗口、重置时间和计划类型，不返回历史按模型 Token 曲线；订阅页的模型明细来自 `~/.codex/sessions/**/*.jsonl` 本机会话日志，只读取模型、时间和 Token 事件，不读取对话内容。
 - 用户目录：Windows 默认读取 `%USERPROFILE%\\.codex\\sessions`，macOS/Linux 默认读取 `~/.codex/sessions`；设置 `CODEX_HOME` 后改为读取 `${CODEX_HOME}/sessions`。应用不会写入其他用户的目录。
-- 多账户日志：首次连接订阅账户使用当前用户的默认 Codex 目录；如果不同账户使用不同 `CODEX_HOME`，可在“管理账户”中为每个订阅账户选择对应的数据目录。
+- 多账户日志：连接订阅账户后，需要在“管理账户”中选择此账户独立使用的 Codex 数据目录。默认不会扫描当前用户的全部日志；一个目录不能分配给多个账户。重新登录会保留目录设置。应用无法自动验证日志中的账户身份，归属由用户确认。
 - 多账户凭据：只由 Electron 主进程处理，使用 `safeStorage` 加密后写入应用数据目录；preload 只暴露无凭据的账户摘要和受限 IPC 方法。
 - 网络请求：使用 Electron `net.request` 和默认会话，遵循 Windows 系统代理；若设置了 `HTTPS_PROXY`、`HTTP_PROXY` 或 `ALL_PROXY`，应用启动时会将其用于官方请求。
 

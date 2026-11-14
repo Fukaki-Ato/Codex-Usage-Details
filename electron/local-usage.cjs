@@ -1,6 +1,9 @@
 const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
+const { Worker, isMainThread, parentPort } = require('node:worker_threads')
+const { createReadStream } = require('node:fs')
+const { createInterface } = require('node:readline')
 const { isOpenAiModel } = require('./models.cjs')
 
 const MAX_SESSION_FILES = 10_000
@@ -13,6 +16,7 @@ function defaultCodexHome() {
 }
 
 const sessionCache = new Map()
+const fileCache = new Map()
 
 function rangeStart(range, now = new Date()) {
   if (range === 'today') {
@@ -48,7 +52,7 @@ function emptyUsage() {
 function addUsage(target, usage) {
   const inputTokens = asInt(usage?.input_tokens)
   const cacheHitTokens = Math.min(inputTokens, asInt(usage?.cached_input_tokens))
-  const cacheWriteTokens = asInt(usage?.cache_write_tokens)
+  const cacheWriteTokens = asInt(usage?.cache_write_input_tokens ?? usage?.cache_write_tokens)
   const outputTokens = asInt(usage?.output_tokens)
   const reasoningTokens = asInt(usage?.reasoning_output_tokens)
   if (!inputTokens && !outputTokens && !reasoningTokens) return false
@@ -80,44 +84,59 @@ function modelRow(model, values, date, hour) {
   return row
 }
 
-function parseSessionText(text, { range = '7d', now = new Date() } = {}) {
+function createSessionParser({ range = '7d', now = new Date() } = {}) {
   const start = rangeStart(range, now)
   const models = new Map()
   const daily = new Map()
   const hourly = new Map()
   let currentModel = ''
+  let previousTotal = ''
+  let malformed = 0
 
-  for (const line of String(text).split(/\r?\n/)) {
+  function consume(line) {
+    if (!line.trim()) return
     let event
     try {
       event = JSON.parse(line)
     } catch {
-      continue
+      malformed += 1
+      return
     }
     const payload = event?.payload || {}
-    if (event?.type === 'world_state') {
-      const model = payload?.state?.collaboration_mode?.model
+    if (event?.type === 'world_state' || event?.type === 'turn_context') {
+      const mode = payload?.state?.collaboration_mode || payload.collaboration_mode
+      const model = event.type === 'turn_context' ? payload.model || mode?.model || mode?.settings?.model : mode?.model || mode?.settings?.model
+      if (model === undefined) return
       currentModel = isOpenAiModel(model) ? model.trim() : ''
-      continue
+      return
     }
-    if (event?.type !== 'event_msg' || payload.type !== 'token_count' || !currentModel) continue
+    if (event?.type !== 'event_msg' || payload.type !== 'token_count') return
+    const total = payload?.info?.total_token_usage
+    // Rate-limit-only notifications can repeat the previous response usage.
+    if (total) {
+      const signature = JSON.stringify([total.input_tokens, total.cached_input_tokens, total.cache_write_input_tokens, total.output_tokens, total.reasoning_output_tokens, total.total_tokens])
+      if (signature === previousTotal) return
+      previousTotal = signature
+    }
+    if (!currentModel) return
     const timestamp = new Date(event.timestamp)
-    if (Number.isNaN(timestamp.getTime()) || (start && timestamp < start)) continue
+    if (Number.isNaN(timestamp.getTime()) || timestamp > now || (start && timestamp < start)) return
     const usage = payload?.info?.last_token_usage
-    if (!usage || typeof usage !== 'object') continue
+    if (!usage || typeof usage !== 'object') return
     const local = new Date(timestamp.getTime())
     const date = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
     const hour = `${String(local.getHours()).padStart(2, '0')}:00`
-    if (!addUsage(models.get(currentModel) || models.set(currentModel, emptyUsage()).get(currentModel), usage)) continue
+    if (!addUsage(models.get(currentModel) || models.set(currentModel, emptyUsage()).get(currentModel), usage)) return
     const dailyKey = `${date}\u0000${currentModel}`
     const hourlyKey = `${date}\u0000${hour}\u0000${currentModel}`
     addUsage(daily.get(dailyKey) || daily.set(dailyKey, emptyUsage()).get(dailyKey), usage)
     addUsage(hourly.get(hourlyKey) || hourly.set(hourlyKey, emptyUsage()).get(hourlyKey), usage)
   }
 
+  function finish() {
   const modelRows = [...models.entries()]
     .map(([model, values]) => modelRow(model, values))
-    .sort((left, right) => right.totalInputTokens + right.outputTokens + right.reasoningTokens - left.totalInputTokens - left.outputTokens - left.reasoningTokens)
+    .sort((left, right) => right.totalInputTokens + right.outputTokens - left.totalInputTokens - left.outputTokens)
   const dailyRows = [...daily.entries()]
     .map(([key, values]) => {
       const [date, model] = key.split('\u0000')
@@ -131,7 +150,15 @@ function parseSessionText(text, { range = '7d', now = new Date() } = {}) {
     })
     .sort((left, right) => `${left.date}\u0000${left.hour}\u0000${left.model}`.localeCompare(`${right.date}\u0000${right.hour}\u0000${right.model}`))
 
-  return { available: true, models: modelRows, modelDaily: dailyRows, modelHourly: hourlyRows }
+  return { available: true, models: modelRows, modelDaily: dailyRows, modelHourly: hourlyRows, malformed }
+  }
+  return { consume, finish }
+}
+
+function parseSessionText(text, options) {
+  const parser = createSessionParser(options)
+  for (const line of String(text).split(/\r?\n/)) parser.consume(line)
+  return parser.finish()
 }
 
 async function listJsonlFiles(directory) {
@@ -208,7 +235,7 @@ async function sessionSignature(files) {
   return signatures.join('|')
 }
 
-async function fetchLocalCodexModelUsage(range, { directory, codexHome, force = false, now = new Date() } = {}) {
+async function scanLocalUsage(range, { directory, codexHome, force = false, now = new Date() } = {}) {
   const sessionsDirectory = directory || path.join(codexHome || defaultCodexHome(), 'sessions')
   let scan
   try {
@@ -218,26 +245,44 @@ async function fetchLocalCodexModelUsage(range, { directory, codexHome, force = 
     throw error
   }
   const { files } = scan
-  const signature = await sessionSignature(files)
+  const signature = `${scan.skippedFiles}:${scan.truncated}:${await sessionSignature(files)}`
   const cached = sessionCache.get(sessionsDirectory)
   if (!force && cached?.signature === signature) return selectLocalUsage(cached.data, range, now)
 
   const combined = { available: true, models: [], modelDaily: [], modelHourly: [] }
+  let unreadable = 0
+  let malformed = 0
   for (const file of files) {
     try {
-      const parsed = parseSessionText(await fs.readFile(file, 'utf8'), { range: 'all', now })
+      const stat = await fs.stat(file)
+      const signature = `${stat.size}:${stat.mtimeMs}`
+      let parsed = fileCache.get(file)?.signature === signature && !force ? fileCache.get(file).data : null
+      if (!parsed) {
+        const parser = createSessionParser({ range: 'all', now })
+        const input = createReadStream(file, { encoding: 'utf8' })
+        const lines = createInterface({ input, crlfDelay: Infinity })
+        try { for await (const line of lines) parser.consume(line) } finally { lines.close(); input.destroy() }
+        parsed = parser.finish()
+        const after = await fs.stat(file)
+        if (after.size === stat.size && after.mtimeMs === stat.mtimeMs) fileCache.set(file, { signature, data: parsed })
+      }
+      malformed += parsed.malformed || 0
       combined.models.push(...parsed.models)
       combined.modelDaily.push(...parsed.modelDaily)
       combined.modelHourly.push(...parsed.modelHourly)
     } catch {
-      // A partially written or inaccessible session file should not hide other sessions.
+      unreadable += 1
     }
   }
   const warnings = []
-  if (scan.skippedFiles) warnings.push(`已跳过 ${scan.skippedFiles} 个过大的会话日志文件。`)
+  const selectedFiles = new Set(files)
+  for (const file of fileCache.keys()) if (file.startsWith(sessionsDirectory + path.sep) && !selectedFiles.has(file)) fileCache.delete(file)
+  if (unreadable) warnings.push(`${unreadable} 个会话日志无法读取。`)
+  if (malformed) warnings.push(`${malformed} 行日志格式不完整，已跳过。`)
+  if (scan.skippedFiles) warnings.push(`已跳过 ${scan.skippedFiles} 个超过文件或总大小限制的会话日志文件。`)
   if (scan.truncated) warnings.push('会话日志数量或目录层级超过扫描上限。')
   const allUsage = { ...combineUsageRows(combined), warning: warnings.join(' ') }
-  sessionCache.set(sessionsDirectory, { signature, data: allUsage })
+  if (!unreadable && !malformed) sessionCache.set(sessionsDirectory, { signature, data: allUsage })
   return selectLocalUsage(allUsage, range, now)
 }
 
@@ -331,4 +376,47 @@ function combineUsageRows(data) {
   }
 }
 
-module.exports = { defaultCodexHome, fetchLocalCodexModelUsage, localRowsToModels, parseSessionText, rangeStart }
+let scannerWorker
+let requestId = 0
+const pendingScans = new Map()
+function closeScanner() {
+  const worker = scannerWorker
+  scannerWorker = undefined
+  for (const pending of pendingScans.values()) pending.reject(new Error('日志读取已停止。'))
+  pendingScans.clear()
+  return worker?.terminate()
+}
+
+function fetchLocalCodexModelUsage(range, options = {}) {
+  if (!isMainThread) return scanLocalUsage(range, options)
+  if (!scannerWorker) {
+    const worker = scannerWorker = new Worker(__filename)
+    worker.on('message', ({ id, result, error }) => {
+      const pending = pendingScans.get(id)
+      pendingScans.delete(id)
+      if (error) pending?.reject(new Error(error)); else pending?.resolve(result)
+      if (!pendingScans.size) worker.unref()
+    })
+    const failed = (error) => {
+      if (scannerWorker !== worker) return
+      scannerWorker = undefined
+      for (const pending of pendingScans.values()) pending.reject(error)
+      pendingScans.clear()
+    }
+    worker.on('error', failed)
+    worker.on('exit', () => failed(new Error('本机日志读取进程已退出。')))
+  }
+  scannerWorker.ref()
+  const id = ++requestId
+  return new Promise((resolve, reject) => { pendingScans.set(id, { resolve, reject }); scannerWorker.postMessage({ id, range, options }) })
+}
+if (!isMainThread) {
+  let queue = Promise.resolve()
+  parentPort.on('message', ({ id, range, options }) => {
+    queue = queue.then(() => scanLocalUsage(range, options)).then(
+      (result) => parentPort.postMessage({ id, result }),
+      (error) => parentPort.postMessage({ id, error: error.message }),
+    )
+  })
+}
+module.exports = { defaultCodexHome, fetchLocalCodexModelUsage, closeScanner, localRowsToModels, parseSessionText, rangeStart }

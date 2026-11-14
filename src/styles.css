@@ -215,5 +215,93 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
   .dashboard-main { padding-left: 20px; padding-right: 20px; }
   .header-controls { gap: 6px; }
   .account-select { min-width: 150px; }
-  .manage-button { display: none; }
+  .manage-button { display: block; }
 }
+
+body { min-width: 360px; }
+:root { --muted: #a0afc5; }
+.dashboard-header { height: auto; min-height: 80px; gap: 20px; padding-top: 14px; padding-bottom: 14px; flex-wrap: wrap; }
+.header-controls { flex-wrap: wrap; }
+.account-select { max-width: 240px; }
+.heading-status { align-items: flex-end; flex-direction: column; gap: 7px; }
+.data-status.error { color: #ffc0ad; }
+.data-status.error i { background: var(--coral); }
+.summary-caption { display: flex; justify-content: space-between; color: var(--muted-light); font-size: 13px; margin: 24px 0 12px; }
+.metric-card { min-height: 124px; }
+.metric-card > strong { font-size: 32px; margin-top: 16px; }
+.metric-card > small { margin-top: 12px; color: #a8b7ce; font-size: 12px; }
+.connection-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px; display: grid; gap: 10px; }
+.connection-card strong { font-size: 23px; }
+.connection-card p { margin: 0; color: var(--muted); }
+.data-note { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.warning-banner { margin-top: 14px; padding: 14px 18px; border: 1px solid #9a7843; background: #352d21; color: #f3d79e; border-radius: 8px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.log-source { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 16px 20px; border: 1px solid var(--line); border-radius: 9px; }
+.log-source p { margin: 7px 0; color: #c4d0e2; overflow-wrap: anywhere; font-size: 13px; }
+.log-source small { color: var(--muted); font-size: 12px; }
+.log-source button { flex-shrink: 0; background: var(--panel-soft); border: 1px solid #657792; color: var(--text); padding: 10px 14px; border-radius: 6px; cursor: pointer; }
+.quota-window.warning { --blue: #f0c27b; }
+.quota-window.danger { --blue: #ffab95; border-color: #a26959; }
+.quota-window small { color: #aebed3; line-height: 1.7; }
+.model-toolbar { display: flex; align-items: center; justify-content: space-between; color: var(--muted-light); gap: 12px; margin-bottom: 12px; font-size: 13px; }
+.model-toolbar select { color: var(--text); background: var(--panel); padding: 7px; border: 1px solid var(--line); border-radius: 5px; }
+.model-table-scroll { overflow: auto; border: 1px solid var(--line); border-radius: 9px; margin-bottom: 18px; max-height: 310px; }
+.model-table { border-collapse: collapse; width: 100%; background: var(--panel); font-size: 13px; }
+.model-table th, .model-table td { padding: 13px 18px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.model-table th { color: var(--muted-light); background: #202a3a; position: sticky; top: 0; }
+.model-table th:first-child, .model-table td:first-child { text-align: left; }
+.model-table button { color: var(--text); background: transparent; cursor: pointer; text-align: left; }
+.model-table tr.selected { background: #243d3b; }
+.model-table tr.selected button { color: #80e6bd; }
+.model-card-head { min-height: 65px; gap: 12px; }
+.model-card-head h3 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+.model-card-head > span { color: var(--muted-light); font-size: 12px; flex-shrink: 0; }
+.charts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 0 18px 10px; }
+.chart-module { padding: 16px 12px 8px; }
+.usage-chart { min-height: 185px; }
+.chart-axis-label, .chart-x-label { fill: #b5c4da; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 16px; padding: 12px 22px 20px; color: #bdcadc; font-size: 12px; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.chart-legend i { width: 10px; height: 10px; border-radius: 2px; }
+.chart-legend .cached { background: var(--accent); }
+.chart-legend .uncached { background: var(--blue); }
+.chart-legend .cache-write { background: #e4b46f; }
+.chart-legend .output { background: var(--coral); }
+.chart-legend .reasoning { background: var(--purple); }
+.modal-backdrop { padding: 20px; }
+.account-modal { max-height: calc(100dvh - 40px); width: min(640px, 100%); overflow-y: auto; }
+.stored-accounts { max-height: 34dvh; overflow-y: auto; }
+.stored-account button { color: #d4b8ae; font-size: 12px; padding: 6px 3px; }
+.stored-account-copy strong { font-size: 13px; }
+.stored-account-copy small, .modal-note { font-size: 12px; color: #adbed4; }
+.error-banner { flex-wrap: wrap; padding: 12px 16px; }
+.error-banner button:disabled { opacity: .5; }
+@media (max-width: 1000px) {
+  .dashboard-header { gap: 14px; }
+  .dashboard-heading { align-items: flex-start; gap: 16px; flex-direction: column; }
+  .heading-status { align-items: flex-start; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .charts-grid { grid-template-columns: 1fr; }
+  .subscription-panel-head { flex-wrap: wrap; gap: 16px; }
+}
+@media (max-width: 640px) {
+  .dashboard-main { padding: 20px 12px 40px; }
+  .dashboard-header { padding: 14px 12px; }
+  .header-controls { gap: 8px; }
+  .account-select { min-width: 0; max-width: 185px; }
+  .source-switch button { padding: 7px; }
+  .quota-grid { grid-template-columns: 1fr; }
+  .section-heading { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .log-source { align-items: flex-start; flex-direction: column; }
+  .metric-card { padding: 16px 12px; }
+  .metric-card > span { font-size: 13px; }
+  .metric-card > strong { font-size: 26px; }
+  .account-modal { padding: 20px 15px; }
+  .stored-account { flex-wrap: wrap; }
+  .stored-account-copy { flex-basis: 65%; }
+  .model-toolbar { align-items: flex-start; flex-direction: column; }
+}
+
+.usage-chart { aspect-ratio: 600 / 220; min-height: 0; min-width: 480px; }
+.chart-module { overflow-x: auto; }
+.chart-axis-label, .chart-x-label { font-size: 14px; }
+.request-tooltip-date, .request-tooltip-value, .tooltip-title, .tooltip-row-label, .tooltip-row-value { font-size: 13px; }

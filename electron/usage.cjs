@@ -3,6 +3,12 @@ const CHATGPT_BASE_URL = 'https://chatgpt.com/backend-api'
 const { isOpenAiModel } = require('./models.cjs')
 const usageSnapshotCache = new Map()
 const subscriptionPayloadCache = new Map()
+const CACHE_TTL_MS = 60_000
+
+function invalidateAccount(accountId) {
+  for (const key of usageSnapshotCache.keys()) if (key.endsWith(`:${accountId}`)) usageSnapshotCache.delete(key)
+  subscriptionPayloadCache.delete(accountId)
+}
 
 function toNumber(value) {
   const number = Number(value)
@@ -65,7 +71,8 @@ async function fetchApiBuckets(secret, range) {
     params.append('group_by[]', 'model')
     if (page) params.set('page', page)
     const payload = await fetchJson(`${API_USAGE_URL}?${params.toString()}`, { headers })
-    if (Array.isArray(payload.data)) buckets.push(...payload.data)
+    if (!Array.isArray(payload.data)) throw new Error('API 用量接口响应结构不兼容，未取得有效数据。')
+    buckets.push(...payload.data)
     if (!payload.has_more || !payload.next_page) break
     page = payload.next_page
     if (pageIndex === 999) throw new Error('官方 API 用量历史过长，分页读取未完成。')
@@ -178,7 +185,7 @@ function normalizeWindow(window) {
   return {
     usedPercent: toNumber(window.used_percent),
     limitWindowSeconds: toNumber(window.limit_window_seconds),
-    resetsAt: toNumber(window.reset_at) * 1000 || null,
+    resetsAt: toNumber(window.reset_at) * 1000 || (toNumber(window.reset_after_seconds) > 0 ? Date.now() + toNumber(window.reset_after_seconds) * 1000 : null),
     resetAfterSeconds: toNumber(window.reset_after_seconds),
   }
 }
@@ -193,9 +200,10 @@ function normalizeSubscriptionPayload(payload, accountId) {
   if (!hasSupportedShape) throw new Error('订阅用量接口响应结构不兼容，请等待适配更新。')
   const primaryWindow = normalizeWindow(rateLimit.primary_window)
   const secondaryWindow = normalizeWindow(rateLimit.secondary_window)
+  const label = (window, fallback) => window.limitWindowSeconds === 604800 ? '周额度' : window.limitWindowSeconds > 0 ? `${window.limitWindowSeconds / 3600} 小时额度` : fallback
   const windows = [
-    primaryWindow ? { label: '5 小时额度', ...primaryWindow } : null,
-    secondaryWindow ? { label: '周额度', ...secondaryWindow } : null,
+    primaryWindow ? { id: 'primary', label: label(primaryWindow, '短期额度'), ...primaryWindow } : null,
+    secondaryWindow ? { id: 'secondary', label: label(secondaryWindow, '长期额度'), ...secondaryWindow } : null,
   ].filter(Boolean)
   if (!windows.length) {
     throw new Error('订阅用量接口响应结构不兼容，请等待适配更新。')
@@ -223,7 +231,7 @@ async function getSubscriptionUsage(accountId, range, { forceRefresh = false } =
   }
   let payload
   const cachedPayload = subscriptionPayloadCache.get(accountId)
-  if (!forceRefresh && cachedPayload?.accessToken === credentials.secret.accessToken) {
+  if (!forceRefresh && cachedPayload?.accessToken === credentials.secret.accessToken && Date.now() - cachedPayload.updatedAt < CACHE_TTL_MS) {
     payload = cachedPayload.payload
   } else {
     try {
@@ -233,13 +241,30 @@ async function getSubscriptionUsage(accountId, range, { forceRefresh = false } =
       credentials = await getSubscriptionCredentials(accountId, true)
       payload = await requestUsage(credentials)
     }
-    subscriptionPayloadCache.set(accountId, { accessToken: credentials.secret.accessToken, payload })
+    subscriptionPayloadCache.set(accountId, { accessToken: credentials.secret.accessToken, payload, updatedAt: Date.now() })
   }
   const { fetchLocalCodexModelUsage, localRowsToModels } = require('./local-usage.cjs')
   let localUsage
+  let localStatus = 'ready'
   try {
-    localUsage = await fetchLocalCodexModelUsage(range, { codexHome: credentials.account.codexHome, force: forceRefresh })
+    const { listAccounts } = require('./storage.cjs')
+    const path = require('node:path')
+    const { realpath } = require('node:fs/promises')
+    const homeKey = (home) => home ? (process.platform === 'win32' ? path.resolve(home).toLowerCase() : path.resolve(home)) : ''
+    const selectedHome = credentials.account.codexHome ? await realpath(credentials.account.codexHome) : null
+    const otherHomes = await Promise.all((await listAccounts()).filter((item) => item.id !== accountId && item.codexHome).map(async (item) => {
+      try { return await realpath(item.codexHome) } catch { return null }
+    }))
+    const duplicate = selectedHome && otherHomes.some((home) => home && homeKey(home) === homeKey(selectedHome))
+    if (!credentials.account.codexHome || duplicate) {
+      localStatus = 'unconfigured'
+      localUsage = { models: [], modelDaily: [], modelHourly: [], warning: duplicate ? '日志目录与其他账户重复，已暂停模型统计，请选择独立目录。' : '请为此账户选择独立使用的 Codex 数据目录；本机日志的账户归属由你确认。' }
+    } else {
+      localUsage = await fetchLocalCodexModelUsage(range, { codexHome: selectedHome })
+      localStatus = !localUsage.available ? 'missing' : localUsage.warning ? 'partial' : 'ready'
+    }
   } catch (error) {
+    localStatus = 'error'
     localUsage = { available: false, models: [], modelDaily: [], modelHourly: [], error: error instanceof Error ? error.message : '无法读取本机会话日志。' }
   }
   const models = localRowsToModels(localUsage, range, new Date())
@@ -250,6 +275,7 @@ async function getSubscriptionUsage(accountId, range, { forceRefresh = false } =
     range,
     mode: 'live',
     models,
+    localUsage: { status: localStatus, directory: credentials.account.codexHome, warning: localUsage.error || localUsage.warning || (localStatus === 'missing' ? '所选目录下没有 sessions 文件夹。' : ''), attribution: 'user-selected' },
     subscription: normalizeSubscriptionPayload(payload, credentials.account.remoteAccountId),
     updatedAt: Date.now(),
     notice: models.length
@@ -262,6 +288,7 @@ async function getUsage({ accountId, source, range, refreshToken = 0 }) {
   if (!accountId || !['api', 'subscription'].includes(source) || !['today', '7d', '30d', 'all'].includes(range)) {
     throw new Error('用量请求参数无效。')
   }
+  await require('./storage.cjs').getAccount(accountId, source)
   const cacheKey = `${source}:${accountId}`
   let accountCache = usageSnapshotCache.get(cacheKey)
   const forceRefresh = !accountCache || accountCache.refreshToken !== refreshToken
@@ -269,13 +296,20 @@ async function getUsage({ accountId, source, range, refreshToken = 0 }) {
     accountCache = { refreshToken, snapshots: new Map() }
     usageSnapshotCache.set(cacheKey, accountCache)
   }
-  const cachedSnapshot = accountCache.snapshots.get(range)
-  if (cachedSnapshot) return cachedSnapshot
-  const snapshot = source === 'api'
-    ? await getApiUsage(accountId, range)
-    : await getSubscriptionUsage(accountId, range, { forceRefresh })
-  accountCache.snapshots.set(range, snapshot)
-  return snapshot
+  const cached = accountCache.snapshots.get(range)
+  if (cached?.promise) return cached.promise
+  if (cached && Date.now() < cached.expiresAt) return { ...cached.snapshot, cache: { hit: true, expiresAt: cached.expiresAt } }
+  const promise = (async () => {
+    const snapshot = source === 'api' ? await getApiUsage(accountId, range) : await getSubscriptionUsage(accountId, range, { forceRefresh })
+    const expiresAt = Date.now() + CACHE_TTL_MS
+    accountCache.snapshots.set(range, { snapshot, expiresAt })
+    return { ...snapshot, cache: { hit: false, expiresAt } }
+  })()
+  accountCache.snapshots.set(range, { promise })
+  try { return await promise } catch (error) {
+    if (accountCache.snapshots.get(range)?.promise === promise) accountCache.snapshots.delete(range)
+    throw error
+  }
 }
 
-module.exports = { getUsage, normalizeApiBuckets, normalizeSubscriptionPayload, rangeWindow }
+module.exports = { getUsage, invalidateAccount, normalizeApiBuckets, normalizeSubscriptionPayload, rangeWindow }

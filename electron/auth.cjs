@@ -85,35 +85,12 @@ async function listenOnRegisteredPort() {
     return { server: await openCallbackServer(1455), port: 1455 }
   } catch (error) {
     if (error.code !== 'EADDRINUSE') throw error
-    await cancelStaleLogin(1455)
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 200))
-      try {
-        return { server: await openCallbackServer(1455), port: 1455 }
-      } catch (retryError) {
-        if (retryError.code !== 'EADDRINUSE') throw retryError
-      }
-    }
     return { server: await openCallbackServer(1457), port: 1457 }
   }
 }
 
-function cancelStaleLogin(port) {
-  return new Promise((resolve) => {
-    const request = http.request({ hostname: '127.0.0.1', port, path: '/cancel', method: 'GET', timeout: 1_000 }, (response) => {
-      response.resume()
-      resolve(true)
-    })
-    request.on('error', () => resolve(false))
-    request.on('timeout', () => {
-      request.destroy()
-      resolve(false)
-    })
-    request.end()
-  })
-}
-
 function writeResponse(response, statusCode, body) {
+  if (response.destroyed || response.writableEnded) return
   response.writeHead(statusCode, {
     'Content-Type': 'text/html; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -144,8 +121,9 @@ function isValidCallbackState(expected, actual) {
     || compareState(`${expected}${LIFE_SCIENCES_STATE_SUFFIX}`, actual)
 }
 
-async function exchangeCode(code, redirectUri, verifier) {
+async function exchangeCode(code, redirectUri, verifier, signal) {
   const response = await requestText(`${ISSUER}/oauth/token`, {
+    signal,
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -175,27 +153,36 @@ async function exchangeCode(code, redirectUri, verifier) {
 
 async function startSubscriptionLogin() {
   if (activeLogin) throw new Error('已有一个官方登录流程正在进行。')
-  const { server, port } = await listenOnRegisteredPort()
+  const controller = new AbortController()
+  const reservation = { controller, phase: 'starting' }
+  activeLogin = reservation
+  let bound
+  try { bound = await listenOnRegisteredPort() } catch (error) {
+    if (activeLogin === reservation) activeLogin = undefined
+    throw error
+  }
+  const { server, port } = bound
+  if (controller.signal.aborted) { server.close(); throw new Error('已取消官方登录。') }
   const state = createState()
   const pkce = createPkce()
   const redirectUri = `http://localhost:${port}/auth/callback`
   const authUrl = buildAuthorizeUrl(port, state, pkce)
+  let login
 
   const result = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
+      controller.abort()
       server.close()
-      activeLogin = undefined
+      if (activeLogin === login) activeLogin = undefined
       reject(new Error('官方登录等待超时，请重新开始登录。'))
     }, 15 * 60 * 1000)
-    activeLogin = { server, reject, timeout }
+    login = { server, reject, timeout, controller, phase: 'waiting' }
+    activeLogin = login
     server.on('request', async (request, response) => {
       const requestUrl = new URL(request.url || '/', `http://localhost:${port}`)
       if (requestUrl.pathname === '/cancel') {
         writeResponse(response, 200, '<h1>登录流程已取消</h1><p>可以关闭此页面。</p>')
-        clearTimeout(timeout)
-        server.close()
-        activeLogin = undefined
-        reject(new Error('官方登录已被新的登录流程取消。'))
+        cancelSubscriptionLogin()
         return
       }
       if (requestUrl.pathname !== '/auth/callback') {
@@ -209,13 +196,19 @@ async function startSubscriptionLogin() {
         return
       }
 
+      if (controller.signal.aborted || login.phase !== 'waiting') {
+        writeResponse(response, 409, '<h1>登录正在处理或已取消</h1>')
+        return
+      }
+      login.phase = 'exchanging'
+
       const oauthError = requestUrl.searchParams.get('error')
       if (oauthError) {
         const description = requestUrl.searchParams.get('error_description') || oauthError
         writeResponse(response, 400, '<h1>授权未完成</h1><p>请返回应用重试。</p>')
         clearTimeout(timeout)
         server.close()
-        activeLogin = undefined
+        if (activeLogin === login) activeLogin = undefined
         reject(new Error(`官方登录未完成：${description}`))
         return
       }
@@ -225,15 +218,18 @@ async function startSubscriptionLogin() {
         writeResponse(response, 400, '<h1>授权未完成</h1><p>缺少授权码，请返回应用重试。</p>')
         clearTimeout(timeout)
         server.close()
-        activeLogin = undefined
+        if (activeLogin === login) activeLogin = undefined
         reject(new Error('官方登录响应缺少授权码。'))
         return
       }
 
       try {
-        const tokens = await exchangeCode(code, redirectUri, pkce.verifier)
+        const tokens = await exchangeCode(code, redirectUri, pkce.verifier, controller.signal)
+        if (controller.signal.aborted || activeLogin !== login) throw new Error('已取消官方登录。')
         const profile = tokenProfile(tokens.id_token)
         const accessTokenProfile = tokenProfile(tokens.access_token)
+        clearTimeout(timeout)
+        login.phase = 'saving'
         const account = await storage.upsertSubscriptionAccount({
           email: profile.email,
           planType: profile.planType,
@@ -242,31 +238,32 @@ async function startSubscriptionLogin() {
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
           accessTokenExpiresAt: accessTokenProfile.expiresAt || profile.expiresAt,
-        })
+        }, { signal: controller.signal })
         writeResponse(response, 200, '<h1>Codex Usage Details 登录成功</h1><p>可以返回桌面应用查看用量了。</p>')
         clearTimeout(timeout)
         server.close()
-        activeLogin = undefined
+        if (activeLogin === login) activeLogin = undefined
         resolve(account)
       } catch (error) {
         writeResponse(response, 500, '<h1>登录失败</h1><p>请返回桌面应用查看错误信息并重试。</p>')
         clearTimeout(timeout)
         server.close()
-        activeLogin = undefined
+        if (activeLogin === login) activeLogin = undefined
         reject(error instanceof Error ? error : new Error('官方登录失败。'))
       }
     })
   })
+  // Cancellation can arrive while the platform is still opening the browser.
+  result.catch(() => undefined)
 
   try {
     await shell.openExternal(authUrl)
   } catch {
-    if (activeLogin) {
-      clearTimeout(activeLogin.timeout)
-      activeLogin.server.close()
-      activeLogin = undefined
-    }
-    throw new Error('无法打开系统浏览器，请手动打开登录地址。')
+    clearTimeout(login.timeout)
+    login.server.close()
+    if (activeLogin === login) activeLogin = undefined
+    controller.abort()
+    login.reject(new Error('无法打开系统浏览器，请重试登录。'))
   }
 
   return result
@@ -275,10 +272,12 @@ async function startSubscriptionLogin() {
 function cancelSubscriptionLogin() {
   if (!activeLogin) return false
   const login = activeLogin
+  if (login.phase === 'saving') return false
   activeLogin = undefined
+  login.controller.abort()
   clearTimeout(login.timeout)
-  login.server.close()
-  login.reject(new Error('已取消官方登录。'))
+  login.server?.close()
+  login.reject?.(new Error('已取消官方登录。'))
   return true
 }
 
@@ -323,7 +322,16 @@ async function refreshSubscriptionCredentials(account, secret, forceRefresh = fa
   return { account: nextAccount, secret: nextSecret }
 }
 
+const credentialRequests = new Map()
+
 async function getSubscriptionCredentials(accountId, forceRefresh = false) {
+  if (credentialRequests.has(accountId)) return credentialRequests.get(accountId)
+  const operation = loadSubscriptionCredentials(accountId, forceRefresh)
+  credentialRequests.set(accountId, operation)
+  try { return await operation } finally { if (credentialRequests.get(accountId) === operation) credentialRequests.delete(accountId) }
+}
+
+async function loadSubscriptionCredentials(accountId, forceRefresh) {
   const { account, secret } = await storage.getSecret(accountId, 'subscription')
   return refreshSubscriptionCredentials(account, secret, forceRefresh)
 }

@@ -2,6 +2,48 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const { localRowsToModels, parseSessionText } = require('../electron/local-usage.cjs')
 
+test('supports turn_context, official cache-write field and repeated cumulative updates', () => {
+  const usage = { input_tokens: 100, cached_input_tokens: 40, cache_write_input_tokens: 10, output_tokens: 20, reasoning_output_tokens: 5, total_tokens: 130 }
+  const tokenEvent = { type: 'event_msg', timestamp: '2026-08-30T10:00:00Z', payload: { type: 'token_count', info: { last_token_usage: usage, total_token_usage: usage } } }
+  const data = parseSessionText([{ type: 'turn_context', payload: { model: 'gpt-5' } }, tokenEvent, tokenEvent].map(JSON.stringify).join('\n'), { range: 'all', now: new Date('2026-08-30T12:00:00Z') })
+  assert.equal(data.models[0].requestCount, 1)
+  assert.equal(data.models[0].cacheWriteTokens, 10)
+  assert.equal(data.models[0].outputTokens, 20)
+})
+
+test('worker scan observes appended logs and surfaces malformed lines', async (t) => {
+  const fs = require('node:fs/promises')
+  const path = require('node:path')
+  const os = require('node:os')
+  const { fetchLocalCodexModelUsage, closeScanner } = require('../electron/local-usage.cjs')
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'usage-log-test-'))
+  t.after(async () => { await closeScanner(); await fs.rm(root, { recursive: true, force: true }) })
+  const file = path.join(root, 'session.jsonl')
+  const text = event('gpt-5', '2026-08-30T10:00:00Z', { input_tokens: 100, output_tokens: 20 })
+  await fs.writeFile(file, text + '\n')
+  const options = { directory: root, now: new Date('2026-08-30T12:00:00Z') }
+  assert.equal((await fetchLocalCodexModelUsage('all', options)).models[0].requestCount, 1)
+  await fs.appendFile(file, text + '\n{incomplete\n')
+  const updated = await fetchLocalCodexModelUsage('all', options)
+  assert.equal(updated.models[0].requestCount, 2)
+  assert.match(updated.warning, /1 行/)
+})
+
+test('unchanged selected files cannot hide new scan-limit warnings', async (t) => {
+  const fs = require('node:fs/promises'), path = require('node:path'), os = require('node:os')
+  const { fetchLocalCodexModelUsage, closeScanner } = require('../electron/local-usage.cjs')
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'usage-limits-test-'))
+  t.after(async () => { await closeScanner(); await fs.rm(root, { recursive: true, force: true }) })
+  await fs.writeFile(path.join(root, 'a.jsonl'), event('gpt-5', '2026-08-30T10:00:00Z', { input_tokens: 1, output_tokens: 1 }))
+  const options = { directory: root, now: new Date('2026-08-30T12:00:00Z') }
+  assert.equal((await fetchLocalCodexModelUsage('all', options)).warning, '')
+  const oversized = path.join(root, 'b.jsonl')
+  const handle = await fs.open(oversized, 'w'); await handle.truncate(65 * 1024 * 1024); await handle.close()
+  assert.match((await fetchLocalCodexModelUsage('all', options)).warning, /已跳过 1/)
+  await fs.unlink(oversized)
+  assert.equal((await fetchLocalCodexModelUsage('all', options)).warning, '')
+})
+
 function event(model, timestamp, usage) {
   return [
     JSON.stringify({ type: 'world_state', payload: { state: { collaboration_mode: { model } } } }),

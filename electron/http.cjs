@@ -27,8 +27,9 @@ async function configureNetworkProxy() {
   return true
 }
 
-function requestText(url, { method = 'GET', headers = {}, body, timeout = 30_000, maxResponseBytes = 8 * 1024 * 1024 } = {}) {
+function requestText(url, { method = 'GET', headers = {}, body, signal, timeout = 30_000, maxResponseBytes = 8 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('请求已取消。'))
     const request = net.request({
       method,
       url,
@@ -47,9 +48,16 @@ function requestText(url, { method = 'GET', headers = {}, body, timeout = 30_000
       if (settled) return
       settled = true
       clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
       if (error) reject(error)
       else resolve(result)
     }
+
+    function abort() {
+      finish(new Error('请求已取消。'))
+      request.abort()
+    }
+    signal?.addEventListener('abort', abort, { once: true })
 
     request.on('response', (response) => {
       const chunks = []

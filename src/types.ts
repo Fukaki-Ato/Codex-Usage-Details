@@ -9,6 +9,7 @@ export interface UsageBucket {
   cacheWriteTokens?: number
   outputTokens: number
   reasoningTokens?: number
+  endTimestamp?: number
 }
 
 export interface ModelUsage {
@@ -28,6 +29,7 @@ export interface UsageAccount {
 }
 
 export interface SubscriptionQuotaWindow {
+  id: 'primary' | 'secondary'
   label: string
   usedPercent: number
   limitWindowSeconds: number
@@ -50,6 +52,8 @@ export interface UsageSnapshot {
   updatedAt: number
   mode?: 'demo' | 'live'
   notice?: string
+  cache?: { hit: boolean; expiresAt: number }
+  localUsage?: { status: 'ready' | 'missing' | 'unconfigured' | 'error' | 'partial'; directory?: string; warning?: string; attribution: 'user-selected' }
   subscription?: SubscriptionUsageDetails
 }
 

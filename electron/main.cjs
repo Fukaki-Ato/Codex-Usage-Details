@@ -5,7 +5,7 @@ const { pathToFileURL } = require('node:url')
 const { registerIpc } = require('./ipc.cjs')
 const { configureNetworkProxy } = require('./http.cjs')
 
-const isDevelopment = !app.isPackaged
+const isDevelopment = !app.isPackaged && process.argv.includes('--dev')
 let mainWindow
 const iconPath = path.join(__dirname, '../build/electron-default.ico')
 
@@ -18,8 +18,8 @@ function createWindow() {
   const window = new BrowserWindow({
     width: 1600,
     height: 1000,
-    minWidth: 1200,
-    minHeight: 780,
+    minWidth: 760,
+    minHeight: 600,
     backgroundColor: '#0b0e13',
     title: 'Codex Usage Details',
     icon: fs.existsSync(iconPath) ? iconPath : undefined,
@@ -66,4 +66,9 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  require('./auth.cjs').cancelSubscriptionLogin()
+  require('./local-usage.cjs').closeScanner()
 })

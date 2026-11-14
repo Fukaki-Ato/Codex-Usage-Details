@@ -85,7 +85,7 @@ function toPublicAccount(record) {
     status: 'connected',
     email: record.email || undefined,
     planType: record.planType || undefined,
-    codexHome: record.kind === 'subscription' ? record.codexHome || defaultCodexHome() : undefined,
+    codexHome: record.kind === 'subscription' ? record.codexHome : undefined,
   }
 }
 
@@ -129,7 +129,7 @@ async function addApiAccount({ name, apiKey, organizationId }) {
   return toPublicAccount(account)
 }
 
-async function upsertSubscriptionAccount({ email, planType, accountId, idToken, accessToken, refreshToken, accessTokenExpiresAt }) {
+async function upsertSubscriptionAccount({ email, planType, accountId, idToken, accessToken, refreshToken, accessTokenExpiresAt }, { signal } = {}) {
   if (!accessToken || !refreshToken) throw new Error('官方登录未返回可刷新的凭据。')
   const account = {
     id: randomUUID(),
@@ -144,8 +144,9 @@ async function upsertSubscriptionAccount({ email, planType, accountId, idToken, 
   }
   let savedAccount
   await mutateStore((store) => {
+    if (signal?.aborted) throw new Error('已取消官方登录。')
     const existing = store.accounts.find((item) => item.kind === 'subscription' && item.remoteAccountId === accountId && accountId)
-    savedAccount = existing ? { ...account, id: existing.id, createdAt: existing.createdAt } : account
+    savedAccount = existing ? { ...existing, ...account, id: existing.id, createdAt: existing.createdAt } : account
     const accounts = existing
       ? store.accounts.map((item) => item.id === existing.id ? savedAccount : item)
       : [...store.accounts, savedAccount]
@@ -181,11 +182,19 @@ async function removeAccount(accountId) {
 async function setCodexHome(accountId, codexHome) {
   if (typeof codexHome !== 'string' || !codexHome.trim()) throw new Error('Codex 数据目录不能为空。')
   const cleanCodexHome = path.resolve(codexHome.trim())
+  const resolvedHome = await fs.realpath(cleanCodexHome)
   let nextAccount
-  await mutateStore((store) => {
+  await mutateStore(async (store) => {
     const current = store.accounts.find((item) => item.id === accountId && item.kind === 'subscription')
     if (!current) throw new Error('只能为订阅账户设置 Codex 数据目录。')
-    nextAccount = { ...current, codexHome: cleanCodexHome }
+    const normalized = (value) => process.platform === 'win32' ? value.toLowerCase() : value
+    for (const item of store.accounts) {
+      if (item.id === accountId || !item.codexHome) continue
+      let existingHome
+      try { existingHome = await fs.realpath(item.codexHome) } catch { continue }
+      if (normalized(existingHome) === normalized(resolvedHome)) throw new Error('该日志目录已分配给其他账户。请选择此账户独立使用的 Codex 数据目录。')
+    }
+    nextAccount = { ...current, codexHome: resolvedHome }
     return { ...store, accounts: store.accounts.map((item) => item.id === accountId ? nextAccount : item) }
   })
   return toPublicAccount(nextAccount)

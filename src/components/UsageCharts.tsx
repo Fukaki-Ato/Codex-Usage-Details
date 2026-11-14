@@ -9,9 +9,10 @@ import {
   tokenScale,
 } from '../chart-utils'
 import type { UsageBucket, UsageRange } from '../types'
+import { totalTokens } from '../usage-utils'
 
-const plot = { left: 42, right: 980, top: 18, bottom: 170 }
-const dataPadding = 48
+const plot = { left: 42, right: 580, top: 18, bottom: 170 }
+const dataPadding = 32
 
 function xPosition(index: number, length: number) {
   const left = plot.left + dataPadding
@@ -59,13 +60,15 @@ function ChartGrid({ scale, labels }: { scale: ReturnType<typeof requestScale>; 
 }
 
 function svgPoint(event: React.MouseEvent<SVGElement>) {
-  const svg = event.currentTarget.ownerSVGElement
+  const svg = event.currentTarget instanceof SVGSVGElement ? event.currentTarget : event.currentTarget.ownerSVGElement
   if (!svg) return { x: plot.left, y: plot.top }
-  const bounds = svg.getBoundingClientRect()
-  return {
-    x: ((event.clientX - bounds.left) / bounds.width) * 1000,
-    y: ((event.clientY - bounds.top) / bounds.height) * 220,
-  }
+  const matrix = svg.getScreenCTM()
+  if (!matrix) return { x: plot.left, y: plot.top }
+  const point = svg.createSVGPoint()
+  point.x = event.clientX
+  point.y = event.clientY
+  const local = point.matrixTransform(matrix.inverse())
+  return { x: local.x, y: local.y }
 }
 
 function useTooltip(length: number) {
@@ -73,6 +76,7 @@ function useTooltip(length: number) {
 
   function move(event: React.MouseEvent<SVGElement>, fixedIndex?: number) {
     if (!length) return
+    if (length === 1) { setActive({ index: 0, pointer: svgPoint(event) }); return }
     const pointer = svgPoint(event)
     if (fixedIndex !== undefined) {
       setActive({ index: fixedIndex, pointer })
@@ -93,6 +97,13 @@ function useTooltip(length: number) {
     activeIndex: active?.index ?? null,
     pointer: active?.pointer ?? null,
     enter,
+    focus: () => setActive({ index: 0, pointer: { x: xPosition(0, length), y: 70 } }),
+    keyboard: (event: React.KeyboardEvent<SVGElement>) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !length) return
+      event.preventDefault()
+      const index = event.key === 'Home' ? 0 : event.key === 'End' ? length - 1 : Math.max(0, Math.min(length - 1, (active?.index || 0) + (event.key === 'ArrowLeft' ? -1 : 1)))
+      setActive({ index, pointer: { x: xPosition(index, length), y: 70 } })
+    },
     move,
     leave: () => setActive(null),
   }
@@ -143,7 +154,7 @@ function smoothPath(points: Array<{ x: number; y: number }>) {
   return path
 }
 
-export function RequestsChart({ buckets, range }: { buckets: UsageBucket[]; range: UsageRange }) {
+export function RequestsChart({ buckets, range, requestLabel: kind = 'API 请求' }: { buckets: UsageBucket[]; range: UsageRange; requestLabel?: string }) {
   const scale = requestScale(buckets.map((bucket) => bucket.requestCount))
   const labels = buckets.map((bucket) => formatBucketLabel(bucket.timestamp, range))
   const axisLabels = sparseLabels(labels)
@@ -158,21 +169,21 @@ export function RequestsChart({ buckets, range }: { buckets: UsageBucket[]; rang
   const areaPath = points.length ? `${linePath} L ${points[points.length - 1].x} ${plot.bottom} L ${points[0].x} ${plot.bottom} Z` : ''
   const activePoint = tooltip.activeIndex === null ? null : points[tooltip.activeIndex]
   const activeBucket = tooltip.activeIndex === null ? null : buckets[tooltip.activeIndex]
-  const requestLabel = activeBucket ? `${formatNumber(activeBucket.requestCount)}次API请求` : ''
-  const requestTooltipWidth = Math.max(92, requestLabel.length * 8 + 24)
+  const requestLabel = activeBucket ? `${formatNumber(activeBucket.requestCount)} 次${kind}` : ''
+  const requestTooltipWidth = Math.max(260, requestLabel.length * 8 + 24)
   const requestTooltip = activePoint ? pointTooltipPosition(activePoint, requestTooltipWidth, 42) : null
 
   return (
     <div className="chart-shell request-chart-shell">
-      <svg className="usage-chart" viewBox="0 0 1000 220" role="img" aria-label="API 请求次数曲线图">
+      <svg className="usage-chart" viewBox="0 0 600 220" role="img" tabIndex={0} aria-label={`${kind}趋势图，左右方向键查看明细`} onFocus={tooltip.focus} onKeyDown={tooltip.keyboard} onBlur={tooltip.leave}>
         <ChartGrid scale={scale} labels={axisLabels} />
         <path className="request-area" d={areaPath} />
         <path className="request-line" d={linePath} />
         {points.map((point, index) => <circle className="request-data-point" key={index} cx={point.x} cy={point.y} r="2.5" />)}
-        {points.map((point, index) => buckets[index].requestCount > 0 && <circle className="request-hit-area" key={`hit-${index}`} cx={point.x} cy={point.y} r="11" onMouseEnter={(event) => tooltip.enter(index, event)} onMouseMove={(event) => tooltip.move(event, index)} onMouseLeave={tooltip.leave} />)}
-        {activePoint && activeBucket && activeBucket.requestCount > 0 && requestTooltip && <g className="request-tooltip-group" transform={`translate(${requestTooltip.x}, ${requestTooltip.y})`}>
+        <rect className="chart-hit-area" x={plot.left} y={plot.top} width={plot.right - plot.left} height={plot.bottom - plot.top} onMouseMove={(event) => tooltip.move(event)} onMouseLeave={tooltip.leave} />
+        {activePoint && activeBucket && requestTooltip && <g className="request-tooltip-group" transform={`translate(${requestTooltip.x}, ${requestTooltip.y})`}>
           <rect className="request-tooltip-background" width={requestTooltipWidth} height="42" rx="7" />
-          <text className="request-tooltip-date" x={requestTooltipWidth / 2} y="17" textAnchor="middle">{labels[tooltip.activeIndex!]}</text>
+          <text className="request-tooltip-date" x={requestTooltipWidth / 2} y="17" textAnchor="middle">{formatTooltipLabel(activeBucket.timestamp, range)}{activeBucket.endTimestamp ? ` 至 ${formatTooltipLabel(activeBucket.endTimestamp, range)}` : ''}</text>
           <text className="request-tooltip-value" x={requestTooltipWidth / 2} y="35" textAnchor="middle">{requestLabel}</text>
         </g>}
       </svg>
@@ -181,7 +192,7 @@ export function RequestsChart({ buckets, range }: { buckets: UsageBucket[]; rang
 }
 
 export function TokensChart({ buckets, range }: { buckets: UsageBucket[]; range: UsageRange }) {
-  const totals = buckets.map((bucket) => bucket.cachedTokens + bucket.uncachedTokens + (bucket.cacheWriteTokens || 0) + bucket.outputTokens + (bucket.reasoningTokens || 0))
+  const totals = buckets.map((bucket) => totalTokens(bucket))
   const scale = tokenScale(totals)
   const labels = buckets.map((bucket) => formatBucketLabel(bucket.timestamp, range))
   const axisLabels = sparseLabels(labels)
@@ -192,29 +203,29 @@ export function TokensChart({ buckets, range }: { buckets: UsageBucket[]; range:
     { label: '输入（命中缓存）', value: activeBucket.cachedTokens, className: 'cached-text', marker: 'cached' },
     { label: '输入（未命中缓存）', value: activeBucket.uncachedTokens, className: 'uncached-text', marker: 'uncached' },
     ...(activeBucket.cacheWriteTokens ? [{ label: '缓存写入', value: activeBucket.cacheWriteTokens, className: 'cache-write-text', marker: 'cache-write' }] : []),
-    { label: '输出', value: activeBucket.outputTokens, className: 'output-text', marker: 'output' },
-    ...(activeBucket.reasoningTokens ? [{ label: '推理', value: activeBucket.reasoningTokens, className: 'reasoning-text', marker: 'reasoning' }] : []),
+    { label: '可见输出', value: Math.max(0, activeBucket.outputTokens - (activeBucket.reasoningTokens || 0)), className: 'output-text', marker: 'output' },
+    ...(activeBucket.reasoningTokens ? [{ label: '推理', value: Math.min(activeBucket.outputTokens, activeBucket.reasoningTokens), className: 'reasoning-text', marker: 'reasoning' }] : []),
   ] : []
   const tokenTooltipHeight = 51 + tokenRows.length * 22
   const tokenTooltipPosition = tooltip.pointer ? floatingTooltipPosition(tooltip.pointer, 330, tokenTooltipHeight) : null
 
   return (
     <div className="chart-shell token-chart-shell">
-      <svg className="usage-chart" viewBox="0 0 1000 220" role="img" aria-label="Token 使用量柱状图">
+      <svg className="usage-chart" viewBox="0 0 600 220" role="img" tabIndex={0} aria-label="Token 使用量柱状图，左右方向键查看明细" onFocus={tooltip.focus} onKeyDown={tooltip.keyboard} onBlur={tooltip.leave}>
         <ChartGrid scale={scale} labels={axisLabels} />
         {buckets.map((bucket, index) => {
           const bucketSpacing = buckets.length > 1 ? xPosition(1, buckets.length) - xPosition(0, buckets.length) : plot.right - plot.left
           const barWidth = Math.max(3, Math.min(36, bucketSpacing * 0.62))
           const x = xPosition(index, buckets.length) - barWidth / 2
-          const total = bucket.cachedTokens + bucket.uncachedTokens + (bucket.cacheWriteTokens || 0) + bucket.outputTokens + (bucket.reasoningTokens || 0)
+          const total = totalTokens(bucket)
           const barTop = plot.bottom - (total / unit / scale.max) * (plot.bottom - plot.top)
           const segments = [
-            { value: bucket.outputTokens, className: 'bar-output' },
-            { value: bucket.reasoningTokens || 0, className: 'bar-reasoning' },
+            { value: Math.max(0, bucket.outputTokens - (bucket.reasoningTokens || 0)), className: 'bar-output' },
+            { value: Math.min(bucket.outputTokens, bucket.reasoningTokens || 0), className: 'bar-reasoning' },
             { value: bucket.cacheWriteTokens || 0, className: 'bar-cache-write' },
             { value: bucket.uncachedTokens, className: 'bar-uncached' },
             { value: bucket.cachedTokens, className: 'bar-cached' },
-          ].filter((segment) => segment.value > 0).sort((left, right) => right.value - left.value)
+          ].filter((segment) => segment.value > 0)
           let offset = plot.bottom
           return <g key={index}>
             {segments.map((segment) => {
@@ -222,9 +233,10 @@ export function TokensChart({ buckets, range }: { buckets: UsageBucket[]; range:
               offset -= height
               return <rect className={segment.className} key={`${index}-${segment.className}`} x={x} y={offset} width={barWidth} height={height} />
             })}
-            <rect className="bar-hit-area" x={x - 8} y={Math.max(plot.top, barTop - 8)} width={barWidth + 16} height={Math.max(16, plot.bottom - Math.max(plot.top, barTop - 8) + 8)} onMouseEnter={(event) => tooltip.enter(index, event)} onMouseMove={(event) => tooltip.move(event, index)} onMouseLeave={tooltip.leave} />
+
           </g>
         })}
+        <rect className="chart-hit-area" x={plot.left} y={plot.top} width={plot.right - plot.left} height={plot.bottom - plot.top} onMouseMove={(event) => tooltip.move(event)} onMouseLeave={tooltip.leave} />
         {tooltip.activeIndex !== null && tooltip.pointer && tokenTooltipPosition && activeBucket && (
           <>
             <line
@@ -237,10 +249,10 @@ export function TokensChart({ buckets, range }: { buckets: UsageBucket[]; range:
             <g className="token-tooltip-group" transform={`translate(${tokenTooltipPosition.x}, ${tokenTooltipPosition.y})`}>
               <rect className="chart-tooltip token-tooltip" width="330" height={tokenTooltipHeight} rx="18" />
               <text className="tooltip-title" x="16" y="26">
-                {formatTooltipLabel(activeBucket.timestamp, range)}
+                {formatTooltipLabel(activeBucket.timestamp, range)}{activeBucket.endTimestamp ? ` 至 ${formatTooltipLabel(activeBucket.endTimestamp, range)}` : ''}
               </text>
               <text className="tooltip-total" x="314" y="26" textAnchor="end">
-                {formatNumber(activeBucket.cachedTokens + activeBucket.uncachedTokens + (activeBucket.cacheWriteTokens || 0) + activeBucket.outputTokens + (activeBucket.reasoningTokens || 0))} <tspan className="tooltip-unit">Tokens</tspan>
+                {formatNumber(totalTokens(activeBucket))} <tspan className="tooltip-unit">Tokens</tspan>
               </text>
               {tokenRows.map((row, index) => {
                 const y = 54 + index * 22
