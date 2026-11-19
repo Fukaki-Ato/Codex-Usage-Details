@@ -49,6 +49,9 @@ function createWindow() {
   }
 }
 
+// Match the Windows shortcut ID assigned by the installer.
+if (process.platform === 'win32') app.setAppUserModelId('com.fukakiato.codexusagedetails')
+
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null)
   try {

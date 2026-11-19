@@ -164,9 +164,17 @@ test('legacy directory aliases cannot be assigned to a second account', async (t
 test('npm start loads built files and only explicit --dev uses the server', async () => {
   for (const dev of [false, true]) {
     let loaded
+    let appUserModelId
     class Window { constructor() { this.webContents = { on() {}, setWindowOpenHandler() {} } } removeMenu() {} loadURL(url) { loaded = url } loadFile(file) { loaded = file } }
-    load('main.cjs', { electron: { app: { isPackaged: false, whenReady: () => Promise.resolve(), on() {} }, BrowserWindow: Window, Menu: { setApplicationMenu() {} } }, './ipc.cjs': { registerIpc() {} }, './http.cjs': { configureNetworkProxy: async () => {} } }, { process: { platform: 'win32', argv: dev ? ['electron', '.', '--dev'] : ['electron', '.'] } })
+    const app = {
+      isPackaged: false,
+      whenReady: () => Promise.resolve(),
+      on() {},
+      setAppUserModelId(id) { appUserModelId = id },
+    }
+    load('main.cjs', { electron: { app, BrowserWindow: Window, Menu: { setApplicationMenu() {} } }, './ipc.cjs': { registerIpc() {} }, './http.cjs': { configureNetworkProxy: async () => {} } }, { process: { platform: 'win32', argv: dev ? ['electron', '.', '--dev'] : ['electron', '.'] } })
     await tick()
+    assert.equal(appUserModelId, require('../package.json').build.appId)
     assert.match(loaded, dev ? /127\.0\.0\.1:5173/ : /dist[\\/]index\.html/)
   }
 })
