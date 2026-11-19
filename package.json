@@ -64,12 +64,14 @@
       "build/**/*",
       "package.json"
     ],
-    "icon": "build/electron-default.ico",
+    "icon": "build/usage-meter.ico",
     "win": {
       "target": "nsis",
-      "icon": "build/electron-default.ico"
+      "icon": "build/usage-meter.ico"
     },
     "nsis": {
+      "installerIcon": "build/usage-meter.ico",
+      "uninstallerIcon": "build/usage-meter.ico",
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "Codex Usage Details",

@@ -5,7 +5,7 @@ import { sumBuckets } from './usage-utils'
 import { AccountDialog } from './components/AccountDialog'
 import { ModelUsagePanel } from './components/ModelUsagePanel'
 import { estimateSnapshotCost } from './pricing'
-import brandIcon from './assets/electron-mark.png'
+import brandIcon from './assets/usage-meter.png'
 import type {
   SubscriptionQuotaWindow,
   SubscriptionUsageDetails,

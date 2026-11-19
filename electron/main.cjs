@@ -7,7 +7,7 @@ const { configureNetworkProxy } = require('./http.cjs')
 
 const isDevelopment = !app.isPackaged && process.argv.includes('--dev')
 let mainWindow
-const iconPath = path.join(__dirname, '../build/electron-default.ico')
+const iconPath = path.join(__dirname, '../build/usage-meter.ico')
 
 function isAllowedPage(url) {
   if (isDevelopment) return /^http:\/\/(127\.0\.0\.1|localhost):5173(?:\/|$)/.test(url)
