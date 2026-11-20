@@ -1,15 +1,22 @@
 export type UsageSource = 'api' | 'subscription'
 export type UsageRange = 'today' | '7d' | '30d' | 'all'
 
-export interface UsageBucket {
-  timestamp: number
-  requestCount: number
+export interface UsageTokenCounts {
   cachedTokens: number
   uncachedTokens: number
   cacheWriteTokens?: number
+  cacheWrite12hTokens?: number
   outputTokens: number
+}
+
+export type AcceleratedRate = 'fast' | 'ultrafastPromotional' | 'ultrafastList'
+
+export interface UsageBucket extends UsageTokenCounts {
+  timestamp: number
+  requestCount: number
   reasoningTokens?: number
   endTimestamp?: number
+  acceleratedUsage?: Partial<Record<AcceleratedRate, UsageTokenCounts>>
 }
 
 export interface ModelUsage {

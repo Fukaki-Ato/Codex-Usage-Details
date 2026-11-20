@@ -16,7 +16,7 @@ function niceStep(value: number) {
 export function requestScale(values: number[]): AxisScale {
   const highest = Math.max(...values, 0)
   const step = Math.max(5, Math.ceil((highest / 4) / 5) * 5)
-  return { step, max: Math.max(5, Math.ceil(highest / step) * step), suffix: '' }
+  return { step, max: step * 4, suffix: '' }
 }
 
 export function tokenScale(values: number[]): AxisScale {
@@ -27,7 +27,7 @@ export function tokenScale(values: number[]): AxisScale {
   const step = niceStep(scaledHighest / 4)
   return {
     step,
-    max: Math.max(step, Math.ceil(scaledHighest / step) * step),
+    max: step * 4,
     suffix,
   }
 }
@@ -41,21 +41,22 @@ export function scaleTicks(scale: AxisScale) {
 }
 
 export function formatAxisValue(value: number, scale: AxisScale) {
+  if (value === 0) return '0'
   if (!scale.suffix) return String(Math.round(value))
   return `${Number(value.toFixed(2))}${scale.suffix}`
 }
 
 export function formatTokenValue(value: number) {
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(value >= 10_000_000_000 ? 0 : 1)}B`
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`
   return String(value)
 }
 
 export function formatBucketLabel(timestamp: number, range: 'today' | '7d' | '30d' | 'all') {
   const date = new Date(timestamp)
   if (range === 'today') return `${String(date.getHours()).padStart(2, '0')}:00`
-  return `${date.getMonth() + 1}/${date.getDate()}`
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
 export function formatTooltipLabel(timestamp: number, range: 'today' | '7d' | '30d' | 'all') {

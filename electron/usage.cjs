@@ -1,6 +1,7 @@
 const API_USAGE_URL = 'https://api.openai.com/v1/organization/usage/completions'
 const CHATGPT_BASE_URL = 'https://chatgpt.com/backend-api'
 const { isOpenAiModel } = require('./models.cjs')
+const { ULTRAFAST_LIST_RATE_START, addAcceleratedUsage } = require('./speed-usage.cjs')
 const usageSnapshotCache = new Map()
 const subscriptionPayloadCache = new Map()
 const CACHE_TTL_MS = 60_000
@@ -51,6 +52,33 @@ async function fetchJson(url, options) {
   return body
 }
 
+async function fetchApiPeriod(headers, { start, end, bucketWidth }) {
+  const buckets = []
+  let page
+  for (let pageIndex = 0; pageIndex < 1000; pageIndex += 1) {
+    const params = new URLSearchParams({
+      start_time: String(start),
+      end_time: String(end),
+      bucket_width: bucketWidth,
+      limit: bucketWidth === '1h' ? '168' : '31',
+    })
+    params.append('group_by[]', 'model')
+    params.append('group_by[]', 'service_tier')
+    if (page) params.set('page', page)
+    const payload = await fetchJson(`${API_USAGE_URL}?${params.toString()}`, { headers })
+    if (!Array.isArray(payload.data)) throw new Error('API 用量接口响应结构不兼容，未取得有效数据。')
+    for (const bucket of payload.data) {
+      // A clipped bucket can retain its original label while only counting
+      // usage from the requested period.
+      buckets.push({ ...bucket, pricingStartTime: Math.max(toNumber(bucket.start_time), start) })
+    }
+    if (!payload.has_more || !payload.next_page) break
+    page = payload.next_page
+    if (pageIndex === 999) throw new Error('官方 API 用量历史过长，分页读取未完成。')
+  }
+  return buckets
+}
+
 async function fetchApiBuckets(secret, range) {
   const window = rangeWindow(range)
   const headers = {
@@ -59,24 +87,12 @@ async function fetchApiBuckets(secret, range) {
   }
   if (secret.organizationId) headers['OpenAI-Organization'] = secret.organizationId
 
+  const cutover = ULTRAFAST_LIST_RATE_START / 1000
+  const periods = window.start < cutover && cutover < window.end
+    ? [{ ...window, end: cutover }, { ...window, start: cutover }]
+    : [window]
   const buckets = []
-  let page
-  for (let pageIndex = 0; pageIndex < 1000; pageIndex += 1) {
-    const params = new URLSearchParams({
-      start_time: String(window.start),
-      end_time: String(window.end),
-      bucket_width: window.bucketWidth,
-      limit: window.bucketWidth === '1h' ? '168' : '31',
-    })
-    params.append('group_by[]', 'model')
-    if (page) params.set('page', page)
-    const payload = await fetchJson(`${API_USAGE_URL}?${params.toString()}`, { headers })
-    if (!Array.isArray(payload.data)) throw new Error('API 用量接口响应结构不兼容，未取得有效数据。')
-    buckets.push(...payload.data)
-    if (!payload.has_more || !payload.next_page) break
-    page = payload.next_page
-    if (pageIndex === 999) throw new Error('官方 API 用量历史过长，分页读取未完成。')
-  }
+  for (const period of periods) buckets.push(...await fetchApiPeriod(headers, period))
   return { buckets, window }
 }
 
@@ -126,6 +142,7 @@ function normalizeApiBuckets(rawBuckets, window, range) {
   for (const bucket of rawBuckets) {
     const timestamp = toNumber(bucket.start_time) * 1000
     if (!timestamp) continue
+    const pricingTimestamp = bucket.pricingStartTime == null ? timestamp : toNumber(bucket.pricingStartTime) * 1000
     const date = new Date(timestamp)
     const key = hourly ? `${formatLocalDate(date)}T${String(date.getHours()).padStart(2, '0')}` : formatLocalDate(date)
     timestamps.set(key, timestamp)
@@ -142,12 +159,23 @@ function normalizeApiBuckets(rawBuckets, window, range) {
         reasoningTokens: 0,
         outputTokens: 0,
       }
-      existing.requestCount += toNumber(result.num_model_requests)
-      existing.cachedTokens += toNumber(result.input_cached_tokens)
-      existing.uncachedTokens += result.input_uncached_tokens == null
-        ? Math.max(0, toNumber(result.input_tokens) - toNumber(result.input_cached_tokens))
+      const cachedTokens = toNumber(result.input_cached_tokens)
+      const recordedCacheWrite12hTokens = toNumber(result.input_cache_write_12h_tokens)
+      const cacheWriteTokens = result.input_cache_write_tokens == null
+        ? toNumber(result.input_cache_write_30m_tokens) + recordedCacheWrite12hTokens
+        : toNumber(result.input_cache_write_tokens)
+      const cacheWrite12hTokens = Math.max(0, Math.min(cacheWriteTokens, recordedCacheWrite12hTokens))
+      const uncachedTokens = result.input_uncached_tokens == null
+        ? Math.max(0, toNumber(result.input_tokens) - cachedTokens - cacheWriteTokens)
         : toNumber(result.input_uncached_tokens)
-      existing.outputTokens += toNumber(result.output_tokens)
+      const outputTokens = toNumber(result.output_tokens)
+      existing.requestCount += toNumber(result.num_model_requests)
+      existing.cachedTokens += cachedTokens
+      existing.uncachedTokens += uncachedTokens
+      if (cacheWriteTokens) existing.cacheWriteTokens = (existing.cacheWriteTokens || 0) + cacheWriteTokens
+      if (cacheWrite12hTokens) existing.cacheWrite12hTokens = (existing.cacheWrite12hTokens || 0) + cacheWrite12hTokens
+      existing.outputTokens += outputTokens
+      addAcceleratedUsage(existing, result.service_tier, pricingTimestamp, { cachedTokens, uncachedTokens, cacheWriteTokens, cacheWrite12hTokens, outputTokens })
       map.set(key, existing)
     }
   }
@@ -200,12 +228,13 @@ function normalizeSubscriptionPayload(payload, accountId) {
   if (!hasSupportedShape) throw new Error('订阅用量接口响应结构不兼容，请等待适配更新。')
   const primaryWindow = normalizeWindow(rateLimit.primary_window)
   const secondaryWindow = normalizeWindow(rateLimit.secondary_window)
+  const isPro = typeof payload.plan_type === 'string' && /^pro(?:[\s_-]*(?:100|200|500))?$/i.test(payload.plan_type.trim())
   const label = (window, fallback) => window.limitWindowSeconds === 604800 ? '周额度' : window.limitWindowSeconds > 0 ? `${window.limitWindowSeconds / 3600} 小时额度` : fallback
   const windows = [
     primaryWindow ? { id: 'primary', label: label(primaryWindow, '短期额度'), ...primaryWindow } : null,
     secondaryWindow ? { id: 'secondary', label: label(secondaryWindow, '长期额度'), ...secondaryWindow } : null,
-  ].filter(Boolean)
-  if (!windows.length) {
+  ].filter((window) => window && !(isPro && window.limitWindowSeconds === 18000))
+  if (!windows.length && !isPro) {
     throw new Error('订阅用量接口响应结构不兼容，请等待适配更新。')
   }
   return {
@@ -269,6 +298,9 @@ async function getSubscriptionUsage(accountId, range, { forceRefresh = false } =
   }
   const models = localRowsToModels(localUsage, range, new Date())
   const localWarning = localUsage.warning ? ` ${localUsage.warning}` : ''
+  const modelNotice = localStatus === 'unconfigured' ? '请先配置此账户的日志目录。'
+    : localStatus === 'missing' || localStatus === 'error' ? '本机模型明细暂不可用，请检查日志目录。'
+      : '当前时间范围没有可展示的 Codex 模型会话记录。'
   return {
     accountId,
     source: 'subscription',
@@ -280,7 +312,7 @@ async function getSubscriptionUsage(accountId, range, { forceRefresh = false } =
     updatedAt: Date.now(),
     notice: models.length
       ? `订阅额度来自官方 /wham/usage；模型明细来自本机 Codex 会话日志。${localWarning}`
-      : `订阅额度来自官方 /wham/usage；当前本机没有可展示的 Codex 模型会话记录。${localWarning}`,
+      : `订阅额度来自官方 /wham/usage；${modelNotice}${localWarning}`,
   }
 }
 

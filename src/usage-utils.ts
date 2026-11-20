@@ -13,6 +13,16 @@ export function sumBuckets(buckets: UsageBucket[]) {
   }), { requests: 0, tokens: 0, cached: 0, input: 0 })
 }
 
+export function mergeBuckets(buckets: UsageBucket[]) {
+  const merged = new Map<number, UsageBucket>()
+  for (const bucket of buckets) {
+    const total = merged.get(bucket.timestamp) || { timestamp: bucket.timestamp, requestCount: 0, cachedTokens: 0, uncachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0 }
+    for (const field of ['requestCount', 'cachedTokens', 'uncachedTokens', 'cacheWriteTokens', 'outputTokens', 'reasoningTokens'] as const) total[field] = (total[field] || 0) + (bucket[field] || 0)
+    merged.set(bucket.timestamp, total)
+  }
+  return [...merged.values()].sort((left, right) => left.timestamp - right.timestamp)
+}
+
 export function aggregateBuckets(buckets: UsageBucket[]) {
   if (buckets.length <= 60) return { buckets, label: '原始时间分桶' }
   const mode = buckets.length <= 366 ? 'week' : buckets.length <= 1800 ? 'month' : 'quarter'

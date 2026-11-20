@@ -2,13 +2,11 @@ const fs = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 const { Worker, isMainThread, parentPort } = require('node:worker_threads')
-const { createReadStream } = require('node:fs')
-const { createInterface } = require('node:readline')
 const { isOpenAiModel } = require('./models.cjs')
+const { readSessionFile } = require('./session-reader.cjs')
+const { addAcceleratedUsage, mergeAcceleratedUsage } = require('./speed-usage.cjs')
 
 const MAX_SESSION_FILES = 10_000
-const MAX_SESSION_FILE_BYTES = 64 * 1024 * 1024
-const MAX_SESSION_TOTAL_BYTES = 512 * 1024 * 1024
 const MAX_SESSION_DEPTH = 32
 
 function defaultCodexHome() {
@@ -49,21 +47,31 @@ function emptyUsage() {
   }
 }
 
-function addUsage(target, usage) {
+function usageCounts(usage) {
   const inputTokens = asInt(usage?.input_tokens)
   const cacheHitTokens = Math.min(inputTokens, asInt(usage?.cached_input_tokens))
   const cacheWriteTokens = asInt(usage?.cache_write_input_tokens ?? usage?.cache_write_tokens)
   const outputTokens = asInt(usage?.output_tokens)
   const reasoningTokens = asInt(usage?.reasoning_output_tokens)
-  if (!inputTokens && !outputTokens && !reasoningTokens) return false
+  if (!inputTokens && !cacheWriteTokens && !outputTokens && !reasoningTokens) return null
+  return {
+    cachedTokens: cacheHitTokens,
+    uncachedTokens: inputTokens - cacheHitTokens,
+    cacheWriteTokens,
+    outputTokens,
+    reasoningTokens,
+  }
+}
+
+function addUsage(target, counts, serviceTier, timestampMs) {
   target.requestCount += 1
-  target.totalInputTokens += inputTokens + cacheWriteTokens
-  target.uncachedInputTokens += inputTokens - cacheHitTokens
-  target.cacheHitTokens += cacheHitTokens
-  target.cacheWriteTokens += cacheWriteTokens
-  target.totalOutputTokens += outputTokens
-  target.reasoningTokens += reasoningTokens
-  return true
+  target.totalInputTokens += counts.cachedTokens + counts.uncachedTokens + counts.cacheWriteTokens
+  target.uncachedInputTokens += counts.uncachedTokens
+  target.cacheHitTokens += counts.cachedTokens
+  target.cacheWriteTokens += counts.cacheWriteTokens
+  target.totalOutputTokens += counts.outputTokens
+  target.reasoningTokens += counts.reasoningTokens
+  addAcceleratedUsage(target, serviceTier, timestampMs, counts)
 }
 
 function modelRow(model, values, date, hour) {
@@ -81,6 +89,7 @@ function modelRow(model, values, date, hour) {
   }
   if (date) row.date = date
   if (hour) row.hour = hour
+  if (values.acceleratedUsage) row.acceleratedUsage = values.acceleratedUsage
   return row
 }
 
@@ -89,6 +98,9 @@ function createSessionParser({ range = '7d', now = new Date() } = {}) {
   const models = new Map()
   const daily = new Map()
   const hourly = new Map()
+  let sessionId
+  let threadSettings
+  let activeTurn
   let currentModel = ''
   let previousTotal = ''
   let malformed = 0
@@ -103,11 +115,38 @@ function createSessionParser({ range = '7d', now = new Date() } = {}) {
       return
     }
     const payload = event?.payload || {}
+    if (event?.type === 'session_meta') {
+      sessionId ||= payload.id
+      return
+    }
+    if (event?.type === 'event_msg') {
+      if (payload.type === 'thread_settings_applied') {
+        if (sessionId && payload.thread_id && payload.thread_id !== sessionId) return
+        if (payload.thread_settings && typeof payload.thread_settings === 'object' && !Array.isArray(payload.thread_settings)) {
+          // Codex can write the initial checkpoint after the first turn context.
+          if (!threadSettings && activeTurn && !activeTurn.hasUsage) activeTurn.settings = payload.thread_settings
+          threadSettings = payload.thread_settings
+        }
+        return
+      }
+      if (payload.type === 'task_started' || payload.type === 'turn_started') {
+        if (!payload.turn_id || activeTurn?.id !== payload.turn_id) activeTurn = { id: payload.turn_id, settings: threadSettings }
+        return
+      }
+      if (payload.type === 'task_complete' || payload.type === 'turn_complete' || payload.type === 'turn_aborted') {
+        if (!payload.turn_id || !activeTurn?.id || activeTurn.id === payload.turn_id) activeTurn = undefined
+        return
+      }
+    }
     if (event?.type === 'world_state' || event?.type === 'turn_context') {
       const mode = payload?.state?.collaboration_mode || payload.collaboration_mode
       const model = event.type === 'turn_context' ? payload.model || mode?.model || mode?.settings?.model : mode?.model || mode?.settings?.model
       if (model === undefined) return
       currentModel = isOpenAiModel(model) ? model.trim() : ''
+      if (event.type === 'turn_context' && (!activeTurn?.id || (payload.turn_id && payload.turn_id !== activeTurn.id))) {
+        // A settings update during a known turn applies to subsequent turns.
+        activeTurn = { id: payload.turn_id, settings: threadSettings }
+      }
       return
     }
     if (event?.type !== 'event_msg' || payload.type !== 'token_count') return
@@ -119,18 +158,22 @@ function createSessionParser({ range = '7d', now = new Date() } = {}) {
       previousTotal = signature
     }
     if (!currentModel) return
+    const counts = usageCounts(payload?.info?.last_token_usage)
+    if (!counts) return
+    if (activeTurn) activeTurn.hasUsage = true
     const timestamp = new Date(event.timestamp)
-    if (Number.isNaN(timestamp.getTime()) || timestamp > now || (start && timestamp < start)) return
-    const usage = payload?.info?.last_token_usage
-    if (!usage || typeof usage !== 'object') return
-    const local = new Date(timestamp.getTime())
-    const date = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
-    const hour = `${String(local.getHours()).padStart(2, '0')}:00`
-    if (!addUsage(models.get(currentModel) || models.set(currentModel, emptyUsage()).get(currentModel), usage)) return
+    const timestampMs = timestamp.getTime()
+    if (Number.isNaN(timestampMs) || timestamp > now || (start && timestamp < start)) return
+    const settings = activeTurn ? activeTurn.settings : threadSettings
+    const settingsModel = typeof settings?.model === 'string' ? settings.model.trim().toLowerCase() : ''
+    const serviceTier = !settingsModel || settingsModel === currentModel.toLowerCase() ? settings?.service_tier : undefined
+    const date = `${timestamp.getFullYear()}-${String(timestamp.getMonth() + 1).padStart(2, '0')}-${String(timestamp.getDate()).padStart(2, '0')}`
+    const hour = `${String(timestamp.getHours()).padStart(2, '0')}:00`
+    addUsage(models.get(currentModel) || models.set(currentModel, emptyUsage()).get(currentModel), counts, serviceTier, timestampMs)
     const dailyKey = `${date}\u0000${currentModel}`
     const hourlyKey = `${date}\u0000${hour}\u0000${currentModel}`
-    addUsage(daily.get(dailyKey) || daily.set(dailyKey, emptyUsage()).get(dailyKey), usage)
-    addUsage(hourly.get(hourlyKey) || hourly.set(hourlyKey, emptyUsage()).get(hourlyKey), usage)
+    addUsage(daily.get(dailyKey) || daily.set(dailyKey, emptyUsage()).get(dailyKey), counts, serviceTier, timestampMs)
+    addUsage(hourly.get(hourlyKey) || hourly.set(hourlyKey, emptyUsage()).get(hourlyKey), counts, serviceTier, timestampMs)
   }
 
   function finish() {
@@ -163,8 +206,6 @@ function parseSessionText(text, options) {
 
 async function listJsonlFiles(directory) {
   const files = []
-  let skippedFiles = 0
-  let totalBytes = 0
   let truncated = false
 
   async function visit(currentDirectory, depth) {
@@ -184,23 +225,12 @@ async function listJsonlFiles(directory) {
         continue
       }
       if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
-      let size
-      try {
-        size = (await fs.stat(entryPath)).size
-      } catch {
-        continue
-      }
-      if (size > MAX_SESSION_FILE_BYTES || totalBytes + size > MAX_SESSION_TOTAL_BYTES) {
-        skippedFiles += 1
-        continue
-      }
-      totalBytes += size
       files.push(entryPath)
     }
   }
 
   await visit(directory, 0)
-  return { files, skippedFiles, truncated }
+  return { files, truncated }
 }
 
 function selectLocalUsage(allUsage, range, now) {
@@ -245,7 +275,7 @@ async function scanLocalUsage(range, { directory, codexHome, force = false, now 
     throw error
   }
   const { files } = scan
-  const signature = `${scan.skippedFiles}:${scan.truncated}:${await sessionSignature(files)}`
+  const signature = `${scan.truncated}:${await sessionSignature(files)}`
   const cached = sessionCache.get(sessionsDirectory)
   if (!force && cached?.signature === signature) return selectLocalUsage(cached.data, range, now)
 
@@ -259,9 +289,7 @@ async function scanLocalUsage(range, { directory, codexHome, force = false, now 
       let parsed = fileCache.get(file)?.signature === signature && !force ? fileCache.get(file).data : null
       if (!parsed) {
         const parser = createSessionParser({ range: 'all', now })
-        const input = createReadStream(file, { encoding: 'utf8' })
-        const lines = createInterface({ input, crlfDelay: Infinity })
-        try { for await (const line of lines) parser.consume(line) } finally { lines.close(); input.destroy() }
+        await readSessionFile(file, parser.consume, stat.size)
         parsed = parser.finish()
         const after = await fs.stat(file)
         if (after.size === stat.size && after.mtimeMs === stat.mtimeMs) fileCache.set(file, { signature, data: parsed })
@@ -279,7 +307,6 @@ async function scanLocalUsage(range, { directory, codexHome, force = false, now 
   for (const file of fileCache.keys()) if (file.startsWith(sessionsDirectory + path.sep) && !selectedFiles.has(file)) fileCache.delete(file)
   if (unreadable) warnings.push(`${unreadable} 个会话日志无法读取。`)
   if (malformed) warnings.push(`${malformed} 行日志格式不完整，已跳过。`)
-  if (scan.skippedFiles) warnings.push(`已跳过 ${scan.skippedFiles} 个超过文件或总大小限制的会话日志文件。`)
   if (scan.truncated) warnings.push('会话日志数量或目录层级超过扫描上限。')
   const allUsage = { ...combineUsageRows(combined), warning: warnings.join(' ') }
   if (!unreadable && !malformed) sessionCache.set(sessionsDirectory, { signature, data: allUsage })
@@ -334,6 +361,7 @@ function localRowsToModels(localUsage, range, now = new Date()) {
       cacheWriteTokens: asInt(row.cacheWriteTokens),
       outputTokens: asInt(row.outputTokens),
       reasoningTokens: asInt(row.reasoningTokens),
+      ...(row.acceleratedUsage ? { acceleratedUsage: row.acceleratedUsage } : {}),
     })
   }
   const timeline = localTimeline(range, now, rows)
@@ -364,6 +392,7 @@ function combineUsageRows(data) {
       current.cacheWriteTokens += row.cacheWriteTokens
       current.totalOutputTokens += row.outputTokens
       current.reasoningTokens += row.reasoningTokens
+      mergeAcceleratedUsage(current, row.acceleratedUsage)
       grouped.set(key, current)
     }
     return [...grouped.values()].map((row) => modelRow(row.model, row, row.date, row.hour)).sort((left, right) => fields(left).localeCompare(fields(right)))

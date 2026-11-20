@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { accounts as demoAccounts, createDemoSnapshot } from './data'
-import { formatNumber, formatTokenValue } from './chart-utils'
+import { formatModelName, formatNumber, formatTokenValue } from './chart-utils'
 import { sumBuckets } from './usage-utils'
 import { AccountDialog } from './components/AccountDialog'
 import { ModelUsagePanel } from './components/ModelUsagePanel'
-import { estimateSnapshotCost } from './pricing'
-import brandIcon from './assets/usage-meter.png'
+import { estimateSnapshotCost, officialPricingSource, officialPricingVerifiedOn } from './pricing'
 import type {
   SubscriptionQuotaWindow,
   SubscriptionUsageDetails,
@@ -41,11 +40,7 @@ function formatResetCountdown(seconds: number) {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : '请求官方用量接口失败。'
-}
-
-function SourceIcon({ source }: { source: UsageSource }) {
-  return <span className={`source-icon ${source}`} aria-hidden="true">{source === 'api' ? '</>' : '✦'}</span>
+  return error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') : '请求官方用量接口失败。'
 }
 
 function QuotaWindow({ window: quota }: { window: SubscriptionQuotaWindow }) {
@@ -60,24 +55,20 @@ function QuotaWindow({ window: quota }: { window: SubscriptionQuotaWindow }) {
   const used = Math.max(0, Math.min(100, quota.usedPercent))
   return (
     <div className={`quota-window ${used >= 95 ? 'danger' : used >= 80 ? 'warning' : ''}`}>
-      <div className="quota-window-head"><span>{quota.label}</span><strong>{Math.round(used)}<em>%</em></strong></div>
-      <div className="quota-progress" role="progressbar" aria-label={quota.label} aria-valuenow={used} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${used}%` }} /></div>
+      <div className="quota-window-head"><h2>{quota.label}</h2><strong>{Math.round(used)}%</strong></div>
       <div className="quota-window-meta"><span>已使用 {Math.round(used)}%</span><span>剩余 {Math.max(0, 100 - Math.round(used))}%</span></div>
-      <small>{quota.resetsAt || quota.resetAfterSeconds ? formatResetCountdown(remainingSeconds) : '预计重置时间未知'}</small>{quota.resetsAt && <small>{new Date(quota.resetsAt).toLocaleString('zh-CN')} 重置</small>}
+      <div className="quota-progress" role="progressbar" aria-label={quota.label} aria-valuenow={used} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${used}%` }} /></div>
+      <div className="quota-reset"><small title={quota.resetsAt ? `${new Date(quota.resetsAt).toLocaleString('zh-CN')} 重置` : undefined}>{quota.resetsAt || quota.resetAfterSeconds ? formatResetCountdown(remainingSeconds) : '预计重置时间未知'}</small></div>
     </div>
   )
 }
 
-function SubscriptionQuota({ details, account, onRefresh, isLoading }: { details: SubscriptionUsageDetails; account: UsageAccount; onRefresh: () => void; isLoading: boolean }) {
+function SubscriptionQuota({ details }: { details: SubscriptionUsageDetails }) {
   const windows = details.windows
   return (
-    <section className="subscription-panel">
-      <div className="subscription-panel-head">
-        <div><h2>ChatGPT 订阅额度</h2></div>
-        <div className="subscription-account-meta"><span>{account.email || account.detail} · {details.planType}</span><button onClick={onRefresh} disabled={isLoading}>{isLoading ? '刷新中...' : '刷新额度'}</button></div>
-      </div>
+    <section className="subscription-panel" aria-label={`ChatGPT ${details.planType} 订阅额度`}>
       <div className="quota-grid">
-        {windows.map((window) => <QuotaWindow key={window.id} window={window} />)}
+        {windows.length ? windows.map((window) => <QuotaWindow key={window.id} window={window} />) : <p className="quota-empty">官方接口未返回可展示的额度窗口。</p>}
       </div>
     </section>
   )
@@ -86,12 +77,14 @@ function SubscriptionQuota({ details, account, onRefresh, isLoading }: { details
 function App() {
   const [accountList, setAccountList] = useState<UsageAccount[]>(desktopBridge ? [] : demoAccounts)
   const [source, setSource] = useState<UsageSource>('subscription')
-  const [range, setRange] = useState<UsageRange>('7d')
+  const [range, setRange] = useState<UsageRange>('today')
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(desktopBridge ? null : 'chatgpt-pro')
-  const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(desktopBridge ? null : createDemoSnapshot('chatgpt-pro', 'subscription', '7d'))
+  const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(desktopBridge ? null : createDemoSnapshot('chatgpt-pro', 'subscription', 'today'))
   const [isLoading, setIsLoading] = useState(Boolean(desktopBridge))
   const [loadError, setLoadError] = useState<string | null>(null)
   const [refreshNonce, setRefreshNonce] = useState(0)
+  const [modelFilter, setModelFilter] = useState('')
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const [showAccountPanel, setShowAccountPanel] = useState(false)
   const [accountMode, setAccountMode] = useState<UsageSource>('subscription')
   const [accountName, setAccountName] = useState('')
@@ -103,6 +96,8 @@ function App() {
 
   const visibleAccounts = accountList.filter((account) => account.sources.includes(source))
   const selectedAccount = visibleAccounts.find((account) => account.id === selectedAccountId) ?? null
+
+  useEffect(() => setModelFilter(''), [selectedAccountId, source])
 
   useEffect(() => {
     if (!desktopBridge) return
@@ -265,48 +260,59 @@ function App() {
   }
 
   const current = snapshot?.accountId === selectedAccountId && snapshot.source === source && snapshot.range === range ? snapshot : null
-  const totals = sumBuckets(current?.models.flatMap((model) => model.buckets) || [])
-  const cost = current ? estimateSnapshotCost(current.models) : null
+  const activeModelFilter = current?.models.some((model) => model.model === modelFilter) ? modelFilter : ''
+  const filteredModels = current?.models.filter((model) => !activeModelFilter || model.model === activeModelFilter) || []
+  const hasModelStats = !!current && (source !== 'subscription' || !current.localUsage || current.localUsage.status === 'ready' || (current.localUsage.status === 'partial' && current.models.length > 0))
+  const totals = sumBuckets(filteredModels.flatMap((model) => model.buckets))
+  const cost = current ? estimateSnapshotCost(filteredModels) : null
   const subscription = current?.subscription
   const status = loadError ? (/授权|凭据|登录/.test(loadError) ? '授权失效' : '读取失败') : !selectedAccount ? '未连接' : isLoading ? '加载中' : current?.mode === 'demo' ? '演示数据' : '已连接'
   const updatedLabel = current ? new Date(current.updatedAt).toLocaleString('zh-CN') : null
-  const hasCost = !!cost?.byModel.some((item) => item.estimate !== null)
+  const hasCost = hasModelStats && !!cost?.byModel.some((item) => item.estimate !== null)
   const rangeLabel = rangeOptions.find((option) => option.value === range)?.label
+  const localStateLabel = current?.localUsage ? { ready: '日志已连接', partial: '统计不完整', unconfigured: '日志未配置', missing: '未找到日志', error: '日志读取失败' }[current.localUsage.status] : ''
   return <div className="dashboard-shell">
-    <header className="dashboard-header">
-      <div className="brand"><img className="brand-icon" src={brandIcon} alt="" /><div><strong>Codex</strong><small>Usage Details</small></div></div>
-      <div className="header-controls">
-        <div className="source-switch" role="group" aria-label="用量来源">{sourceOptions.map((option) => <button aria-pressed={source === option.value} className={source === option.value ? 'selected' : ''} key={option.value} onClick={() => changeSource(option.value)}><SourceIcon source={option.value} />{option.label}</button>)}</div>
-        <select className="account-select" aria-label="选择账户" value={selectedAccountId ?? ''} onChange={(event) => setSelectedAccountId(event.target.value || null)}><option value="" disabled={visibleAccounts.length > 0}>未连接账户</option>{visibleAccounts.map((account) => <option value={account.id} key={account.id}>{account.name} · {account.email || account.detail}</option>)}</select>
-        <button className="manage-button" onClick={openAccountPanel}>管理账户</button>
-        <button className="refresh-button" onClick={refresh} disabled={!selectedAccount || isLoading} title="刷新数据" aria-label="刷新数据">↻</button>
-      </div>
-    </header>
     <main className="dashboard-main">
-      <section className="dashboard-heading"><div><h1>{source === 'api' ? 'API 用量总览' : '订阅用量总览'}</h1><p>{source === 'api' ? '组织级模型用量与标准文本价格估算' : '当前订阅额度 · 独立目录中的本机模型记录'}</p></div>
-        <div className="heading-status" aria-live="polite"><span className={`data-status ${loadError ? 'error' : current?.mode === 'live' ? 'live' : 'demo'}`}><i />{status}</span><span>{updatedLabel ? `更新于 ${updatedLabel}${current?.cache?.hit ? ' · 缓存' : ''}` : '尚未取得数据'}{desktopBridge && selectedAccount ? ' · 每分钟自动刷新' : ''}</span></div>
-      </section>
+      <header className="dashboard-heading">
+        <div className="heading-copy"><h1>OpenAI 账户用量</h1><p>{rangeLabel}用量 · <span>{updatedLabel ? `读取于 ${updatedLabel}${current?.cache?.hit ? ' · 缓存' : ''}` : '尚未取得数据'}</span></p></div>
+        <div className="heading-actions">
+          <div className="range-picker" role="group" aria-label="时间范围">{rangeOptions.map((option) => <button aria-pressed={range === option.value} className={range === option.value ? 'selected' : ''} key={option.value} onClick={() => setRange(option.value)}>{option.label}</button>)}</div>
+          <button className="refresh-button" onClick={refresh} disabled={!selectedAccount || isLoading} aria-label="刷新数据">{isLoading ? '刷新中…' : '刷新'}</button>
+        </div>
+        <div className="dashboard-context">
+          <div className="heading-status" aria-live="polite"><span className={`data-status ${loadError ? 'error' : current?.mode === 'live' ? 'live' : 'demo'}`}><i />{status}</span><span className="account-context">{selectedAccount?.name || '尚未连接账户'}<span className="context-divider">/</span>{source === 'api' ? 'API 用量' : '订阅用量'}</span>{localStateLabel && <span className={`local-state ${current?.localUsage?.status}`}>{localStateLabel}</span>}{activeModelFilter && <button className="active-model-filter" onClick={() => setModelFilter('')} aria-label={`清除 ${formatModelName(activeModelFilter)} 模型筛选`}>{formatModelName(activeModelFilter)} <span aria-hidden="true">×</span></button>}</div>
+          <div className="context-actions"><button className={`filter-toggle ${filtersOpen ? 'selected' : ''}`} aria-expanded={filtersOpen} aria-controls="dashboard-filters" onClick={() => setFiltersOpen((open) => !open)}>账户与筛选 <span aria-hidden="true">{filtersOpen ? '−' : '+'}</span></button><button className="manage-button" onClick={openAccountPanel}>管理账户</button></div>
+        </div>
+        <div className="dashboard-filters" id="dashboard-filters" hidden={!filtersOpen}>
+          <div className="source-switch" role="group" aria-label="用量来源">{sourceOptions.map((option) => <button aria-pressed={source === option.value} className={source === option.value ? 'selected' : ''} key={option.value} onClick={() => changeSource(option.value)}>{option.label}</button>)}</div>
+          <select className="account-select" aria-label="选择账户" value={selectedAccountId ?? ''} onChange={(event) => setSelectedAccountId(event.target.value || null)}><option value="" disabled={visibleAccounts.length > 0}>未连接账户</option>{visibleAccounts.map((account) => <option value={account.id} key={account.id}>{account.name} · {account.email || account.detail}</option>)}</select>
+          <label className="model-select"><span>模型</span><select aria-label="筛选模型" disabled={!current?.models.length} value={activeModelFilter} onChange={(event) => setModelFilter(event.target.value)}><option value="">全部模型{current?.models.length ? `（${current.models.length}）` : ''}</option>{current?.models.map((model) => <option key={model.model} value={model.model}>{formatModelName(model.model)}</option>)}</select></label>
+          {activeModelFilter && <button className="clear-filter" onClick={() => setModelFilter('')}>清除模型筛选</button>}
+        </div>
+      </header>
       {loadError && <section className="error-banner" role="alert"><strong>{loadError}{current ? ' 当前保留上次成功数据。' : ''}</strong><button disabled={isLoading} onClick={refresh}>重试</button><button onClick={openAccountPanel}>管理账户</button></section>}
-      {source === 'subscription' && subscription && selectedAccount && <SubscriptionQuota details={subscription} account={selectedAccount} onRefresh={refresh} isLoading={isLoading} />}
+      {source === 'subscription' && subscription && selectedAccount && <SubscriptionQuota details={subscription} />}
       {source === 'subscription' && !subscription && <section className="connection-card"><span>账户状态</span><strong>{status}</strong><p>{selectedAccount ? '取得订阅额度后会显示窗口和重置时间。' : '连接账户后查看当前订阅额度。'}</p></section>}
-      <div className="summary-caption"><span>{rangeLabel} · {source === 'subscription' ? '本机日志统计' : '组织 API 统计'}</span>{isLoading && <span role="status">正在更新…</span>}</div>
-      <section className="metric-grid" aria-label="用量摘要">
-        <div className="metric-card green"><span>输入缓存命中率</span><strong>{current ? `${(totals.input ? totals.cached / totals.input * 100 : 0).toFixed(1)}%` : '--'}</strong></div>
-        <div className="metric-card blue"><span>总 Token</span><strong title={current ? formatNumber(totals.tokens) : undefined}>{current ? formatTokenValue(totals.tokens) : '--'}</strong><small>推理包含在输出中</small></div>
-        <div className="metric-card purple"><span>{source === 'api' ? 'API 请求数' : '用量记录数'}</span><strong>{current ? formatNumber(totals.requests) : '--'}</strong></div>
-        <div className="metric-card coral"><span>{cost?.unknownModels.length ? '已计价模型小计' : source === 'api' ? '估算费用' : '按 API 价格折算'}</span><strong>{hasCost ? `$${cost!.amount.toFixed(2)}` : '--'}</strong><small>{source === 'subscription' ? '等值估算，不代表订阅账单' : 'Standard 文本价格 · USD'}</small></div>
+      <section className="metric-grid" aria-label="用量摘要" title={`${activeModelFilter || '全部模型'} · ${rangeLabel}`}>
+        <div className="metric-card green" title="包含缓存输入、未缓存输入和输出；推理包含在输出中"><span>Token 用量</span><strong title={hasModelStats ? formatNumber(totals.tokens) : undefined}>{hasModelStats ? formatTokenValue(totals.tokens) : '--'}</strong></div>
+        <div className="metric-card purple" title={source === 'api' ? '官方接口返回的模型请求数' : '本机会话日志中的用量事件，不等同于计费请求数'}><span>{source === 'api' ? '请求数' : '用量记录数'}</span><strong>{hasModelStats ? formatNumber(totals.requests) : '--'}</strong></div>
+        <div className="metric-card green" title="缓存命中输入占总输入的比例"><span>缓存命中率</span><strong>{hasModelStats ? `${(totals.input ? totals.cached / totals.input * 100 : 0).toFixed(2)}%` : '--'}</strong></div>
+        <div className="metric-card coral" title="按适用的文本 API 费率估算，单位为美元"><span>{cost?.unknownModels.length ? '已计价模型小计' : source === 'api' ? '估算费用' : 'API 等值费用'}</span><strong>{hasCost ? `$${cost!.amount.toFixed(2)}` : '--'}</strong></div>
       </section>
-      {current?.notice && <p className="data-note">{current.notice}</p>}
       {cost && cost.unknownModels.length > 0 && <div className="warning-banner" role="status">以下模型未计入金额：{cost.unknownModels.join('、')}。总 Token 和记录数仍包含这些模型。</div>}
-      {source === 'subscription' && selectedAccount && <div className="log-source"><div><strong>模型明细来源</strong><p>{!desktopBridge ? '演示数据（不读取本机日志）' : selectedAccount.codexHome || '尚未选择日志目录'}</p><small>目录归属由你确认，应用无法从日志自动验证账户身份。</small></div><button onClick={openAccountPanel}>设置日志目录</button></div>}
-      {current?.localUsage?.warning && <div className="warning-banner" role={current.localUsage.status === 'error' ? 'alert' : 'status'}>{current.localUsage.warning}</div>}
+      {current?.localUsage?.warning && <div className="warning-banner" role={current.localUsage.status === 'error' ? 'alert' : 'status'}><span>{current.localUsage.warning}</span>{selectedAccount && current.localUsage.status !== 'partial' && <button disabled={accountBusy} onClick={() => chooseCodexHome(selectedAccount)}>设置日志目录 →</button>}</div>}
       <section className="model-section" aria-busy={isLoading}>
-        <div className="section-heading"><div><h2>模型用量</h2><p>{source === 'subscription' ? '记录数来自日志中的用量事件，不等同于官方计费请求数' : '比较模型用量，选择模型查看趋势'}</p></div><div className="range-picker" role="group" aria-label="时间范围">{rangeOptions.map((option) => <button aria-pressed={range === option.value} className={range === option.value ? 'selected' : ''} key={option.value} onClick={() => setRange(option.value)}>{option.label}</button>)}</div></div>
-        {current?.models.length ? <ModelUsagePanel models={current.models} range={range} source={source} /> : <div className="empty-state">
-          <strong>{isLoading ? '正在读取用量…' : loadError ? '用量读取失败' : !selectedAccount ? '先连接一个账户' : current?.localUsage?.status === 'unconfigured' ? '先配置此账户的日志目录' : current?.localUsage?.status === 'error' ? '本机日志读取失败' : '当前时间范围没有模型记录'}</strong>
+        {current?.models.length ? <ModelUsagePanel models={current.models} range={range} source={source} selectedModel={activeModelFilter} onSelectModel={setModelFilter} /> : <div className="empty-state">
+          <strong>{isLoading ? '正在读取用量…' : loadError ? '用量读取失败' : !selectedAccount ? '先连接一个账户' : current?.localUsage?.status === 'unconfigured' ? '先配置此账户的日志目录' : current?.localUsage?.status === 'error' ? '本机日志读取失败' : current?.localUsage?.status === 'missing' ? '所选目录没有会话日志' : '当前时间范围没有模型记录'}</strong>
           {!selectedAccount && <button onClick={openAccountPanel}>管理账户 →</button>}
         </div>}
       </section>
+      <details className="data-details"><summary>数据来源与统计口径</summary>
+        {current?.notice && <p className="data-note">{current.notice}</p>}
+        <p>Token 总量包含输入与输出，推理已包含在输出中。{source === 'subscription' ? '本机用量按日志记录的请求档位折算 API 等值费用，订阅额度见上方。' : 'API 用量采用接口返回的服务档位，单位为美元。'}缺价模型不计入金额。</p>
+        <p title={officialPricingSource}>OpenAI 官方定价 · {officialPricingVerifiedOn} 核验。GPT-6.2 Astra 和 Sol 的 Fast、Ultrafast 用量按记录计价，缺少档位时使用 Standard。估算采用短上下文费率。GPT-6.2 API 明确记录的 12 小时缓存写入按对应单价计费，其余写入使用 30 分钟单价。</p>
+        {source === 'subscription' && selectedAccount && <div className="log-source"><div><strong>模型明细来源</strong><p>{!desktopBridge ? '演示数据（不读取本机日志）' : selectedAccount.codexHome || '尚未选择日志目录'}</p><small>目录归属由你确认。</small></div><button disabled={accountBusy} onClick={() => chooseCodexHome(selectedAccount)}>设置日志目录</button></div>}
+      </details>
     </main>
     {showAccountPanel && <AccountDialog busy={accountBusy} onClose={closeAccountPanel}>
       <div className="account-mode-switch"><button disabled={accountBusy} className={accountMode === 'api' ? 'selected' : ''} onClick={() => setAccountMode('api')}>API 账户</button><button disabled={accountBusy} className={accountMode === 'subscription' ? 'selected' : ''} onClick={() => setAccountMode('subscription')}>订阅账户</button></div>

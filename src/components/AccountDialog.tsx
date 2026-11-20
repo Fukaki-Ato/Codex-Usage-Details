@@ -25,7 +25,7 @@ export function AccountDialog({ busy, onClose, children }: { busy: boolean; onCl
   }, [])
   return <div className="modal-backdrop" onClick={() => { if (!busy) onClose() }}>
     <section ref={dialog} tabIndex={-1} className="account-modal" role="dialog" aria-modal="true" aria-labelledby="account-modal-title" onClick={(event) => event.stopPropagation()}>
-      <div className="modal-head"><div><p className="eyebrow">ACCOUNT CONNECTION</p><h2 id="account-modal-title">管理账户</h2></div><button aria-label="关闭" disabled={busy} onClick={onClose}>×</button></div>
+      <div className="modal-head"><h2 id="account-modal-title">管理账户</h2><button aria-label="关闭" disabled={busy} onClick={onClose}>×</button></div>
       {children}
     </section>
   </div>

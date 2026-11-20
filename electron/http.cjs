@@ -27,7 +27,43 @@ async function configureNetworkProxy() {
   return true
 }
 
-function requestText(url, { method = 'GET', headers = {}, body, signal, timeout = 30_000, maxResponseBytes = 8 * 1024 * 1024 } = {}) {
+function isTransientDisconnect(error) {
+  return /ERR_CONNECTION_(?:CLOSED|RESET)|ERR_NETWORK_CHANGED|\bECONNRESET\b|\bEPIPE\b/.test(`${error?.code || ''} ${error?.message || ''}`)
+}
+
+function waitForRetry(signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error('请求已取消。'))
+    const timer = setTimeout(() => finish(), 250)
+    function finish(error) {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', abort)
+      if (error) reject(error)
+      else resolve()
+    }
+    function abort() { finish(new Error('请求已取消。')) }
+    signal?.addEventListener('abort', abort, { once: true })
+  })
+}
+
+async function requestText(url, options = {}) {
+  const retryable = (options.method || 'GET').toUpperCase() === 'GET' && options.body == null
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestTextOnce(url, options)
+    } catch (error) {
+      if (options.signal?.aborted) throw new Error('请求已取消。')
+      if (!isTransientDisconnect(error)) throw error
+      if (retryable && attempt === 0) {
+        await waitForRetry(options.signal)
+        continue
+      }
+      throw new Error('网络连接已关闭或中断，请检查网络或代理设置后重试。', { cause: error })
+    }
+  }
+}
+
+function requestTextOnce(url, { method = 'GET', headers = {}, body, signal, timeout = 30_000, maxResponseBytes = 8 * 1024 * 1024 } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new Error('请求已取消。'))
     const request = net.request({
@@ -40,8 +76,8 @@ function requestText(url, { method = 'GET', headers = {}, body, signal, timeout 
     let settled = false
     let responseBytes = 0
     const timer = setTimeout(() => {
-      request.abort()
       finish(new Error('官方请求超时，请检查网络或代理设置。'))
+      request.abort()
     }, timeout)
 
     function finish(error, result) {
@@ -65,8 +101,8 @@ function requestText(url, { method = 'GET', headers = {}, body, signal, timeout 
         if (settled) return
         responseBytes += chunk.length
         if (responseBytes > maxResponseBytes) {
-          request.abort()
           finish(new Error('官方响应过大，已停止读取。'))
+          request.abort()
           return
         }
         chunks.push(Buffer.from(chunk))

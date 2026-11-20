@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 256 256" fill="none">
+  <title>Codex Usage Details</title>
+  <desc>A stepped C in blue and mint on a midnight-blue rounded tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="40" y1="8" x2="210" y2="248" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1D3150"/>
+      <stop offset="1" stop-color="#101B2C"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="181" y1="54" x2="93" y2="202" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#77B6FF"/>
+      <stop offset=".48" stop-color="#69D9D2"/>
+      <stop offset="1" stop-color="#5CE3B5"/>
+    </linearGradient>
+  </defs>
+  <g id="background">
+    <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#tile)"/>
+    <rect x="8.75" y="8.75" width="238.5" height="238.5" rx="51.25" stroke="#9BCEFF" stroke-opacity=".14" stroke-width="1.5"/>
+  </g>
+  <g id="monogram">
+    <path d="M190 54H118C79 54 56 81 56 123V133C56 175 79 202 118 202H202V168H120C100 168 90 155 90 133V123C90 101 100 88 120 88H174V72H190V54Z" fill="url(#mark)"/>
+  </g>
+</svg>

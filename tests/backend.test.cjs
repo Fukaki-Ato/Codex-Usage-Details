@@ -30,6 +30,97 @@ test('aborting an HTTP request closes the transport and rejects promptly', async
   assert.equal(aborted, true)
 })
 
+test('a temporarily closed GET connection is retried once', async () => {
+  let attempts = 0
+  const http = load('http.cjs', { electron: {
+    session: { defaultSession: {} },
+    net: { request: () => {
+      const request = new EventEmitter()
+      request.abort = () => {}
+      request.end = () => queueMicrotask(() => {
+        if (++attempts === 1) { request.emit('error', new Error('net::ERR_CONNECTION_CLOSED')); return }
+        const response = new EventEmitter(); response.statusCode = 200; response.headers = {}
+        request.emit('response', response); response.emit('data', Buffer.from('{}')); response.emit('end')
+      })
+      return request
+    } },
+  } })
+  assert.equal((await http.requestText('https://example.invalid')).statusCode, 200)
+  assert.equal(attempts, 2)
+})
+
+test('token POST requests are not retried; persistent errors are readable', async () => {
+  let attempts = 0
+  const http = load('http.cjs', { electron: { session: { defaultSession: {} }, net: { request: () => {
+    const request = new EventEmitter(); request.abort = () => {}; request.write = () => {}
+    request.end = () => queueMicrotask(() => { attempts++; request.emit('error', new Error('net::ERR_CONNECTION_CLOSED')) })
+    return request
+  } } } })
+  await assert.rejects(http.requestText('https://example.invalid', { method: 'POST', body: 'synthetic' }), /连接.*关闭/)
+  assert.equal(attempts, 1)
+})
+
+test('persistent GET disconnects stop after two attempts', async () => {
+  let attempts = 0
+  const http = load('http.cjs', { electron: { session: { defaultSession: {} }, net: { request: () => {
+    const request = new EventEmitter(); request.abort = () => {}
+    request.end = () => queueMicrotask(() => { attempts++; request.emit('error', new Error('net::ERR_CONNECTION_RESET')) })
+    return request
+  } } } })
+  await assert.rejects(http.requestText('https://example.invalid'), /连接.*中断/)
+  assert.equal(attempts, 2)
+})
+
+test('cancelling during retry backoff prevents another request', async () => {
+  let attempts = 0
+  const http = load('http.cjs', { electron: { session: { defaultSession: {} }, net: { request: () => {
+    const request = new EventEmitter(); request.abort = () => {}
+    request.end = () => queueMicrotask(() => { attempts++; request.emit('error', new Error('net::ERR_CONNECTION_CLOSED')) })
+    return request
+  } } } })
+  const controller = new AbortController()
+  const result = http.requestText('https://example.invalid', { signal: controller.signal })
+  await tick()
+  controller.abort()
+  await assert.rejects(result, /取消/)
+  assert.equal(attempts, 1)
+})
+
+test('response disconnect retries with a fresh body buffer', async () => {
+  let attempts = 0
+  const http = load('http.cjs', { electron: { session: { defaultSession: {} }, net: { request: () => {
+    const request = new EventEmitter(); request.abort = () => {}
+    request.end = () => queueMicrotask(() => {
+      const response = new EventEmitter(); response.statusCode = 200; response.headers = {}
+      request.emit('response', response)
+      if (++attempts === 1) { response.emit('data', Buffer.from('partial')); response.emit('error', new Error('net::ERR_CONNECTION_CLOSED')) }
+      else { response.emit('data', Buffer.from('complete')); response.emit('end') }
+    })
+    return request
+  } } } })
+  assert.equal((await http.requestText('https://example.invalid')).body, 'complete')
+  assert.equal(attempts, 2)
+})
+
+test('timeout and size-limit errors survive synchronous transport abort errors', async () => {
+  for (const sizeLimit of [false, true]) {
+    let attempts = 0
+    const http = load('http.cjs', { electron: { session: { defaultSession: {} }, net: { request: () => {
+      attempts++
+      const request = new EventEmitter()
+      request.abort = () => request.emit('error', new Error('net::ERR_CONNECTION_CLOSED'))
+      request.end = () => {
+        if (!sizeLimit) return
+        const response = new EventEmitter()
+        request.emit('response', response); response.emit('data', Buffer.from('large'))
+      }
+      return request
+    } } } })
+    await assert.rejects(http.requestText('https://example.invalid', { timeout: 5, maxResponseBytes: 1 }), sizeLimit ? /响应过大/ : /超时/)
+    assert.equal(attempts, 1)
+  }
+})
+
 test('relogin preserves log directory and accounts cannot share a directory', async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'usage-storage-test-'))
   t.after(() => fsp.rm(root, { recursive: true, force: true }))
@@ -71,6 +162,40 @@ test('snapshot cache expires, separates accounts, coalesces requests and invalid
   assert.equal(requests, 4)
 })
 
+test('API usage groups by model and tier on each page and splits the Ultrafast price transition', async () => {
+  const cutover = Date.parse('2027-03-01T08:00:00Z') / 1000
+  const dayStart = Date.parse('2027-03-01T00:00:00Z') / 1000
+  const now = (cutover + 3600) * 1000
+  class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now])) } static now() { return now } }
+  const requests = []
+  const usage = load('usage.cjs', {
+    './storage.cjs': { getAccount: async () => ({}), getSecret: async () => ({ secret: { apiKey: 'synthetic' } }) },
+    './http.cjs': { requestText: async (url) => {
+      const query = new URL(url).searchParams
+      requests.push(query)
+      const before = Number(query.get('end_time')) === cutover
+      const firstPage = before && !query.has('page')
+      const data = firstPage ? [] : [{ start_time: dayStart, results: [
+        { model: 'gpt-6.2-astra', service_tier: 'ultrafast', input_tokens: before ? 10 : 20, num_model_requests: 1 },
+      ] }]
+      return { statusCode: 200, body: JSON.stringify({ data, has_more: firstPage, next_page: firstPage ? 'next' : null }) }
+    } },
+  }, { Date: Clock })
+
+  const result = await usage.getUsage({ accountId: 'one', source: 'api', range: '7d' })
+  assert.equal(requests.length, 3)
+  for (const query of requests) assert.deepEqual(query.getAll('group_by[]'), ['model', 'service_tier'])
+  assert.equal(requests[0].get('end_time'), String(cutover))
+  assert.equal(requests[1].get('page'), 'next')
+  assert.equal(requests[2].get('start_time'), String(cutover))
+  assert.equal(requests[2].has('page'), false)
+  const [row] = result.models[0].buckets.filter((bucket) => bucket.requestCount > 0)
+  assert.equal(row.requestCount, 2)
+  assert.equal(row.uncachedTokens, 30)
+  assert.equal(row.acceleratedUsage.ultrafastPromotional.uncachedTokens, 10)
+  assert.equal(row.acceleratedUsage.ultrafastList.uncachedTokens, 20)
+})
+
 test('subscription logs require a directory and report read failures separately from empty data', async () => {
   let home
   const usage = load('usage.cjs', {
@@ -81,13 +206,16 @@ test('subscription logs require a directory and report read failures separately 
     './local-usage.cjs': { fetchLocalCodexModelUsage: async () => { throw new Error('模拟磁盘错误') }, localRowsToModels: () => [] },
   })
   const input = { accountId: 'one', source: 'subscription', range: '7d' }
-  assert.equal((await usage.getUsage(input)).localUsage.status, 'unconfigured')
+  const unconfigured = await usage.getUsage(input)
+  assert.equal(unconfigured.localUsage.status, 'unconfigured')
+  assert.match(unconfigured.notice, /请先配置/)
   home = path.resolve('synthetic')
   usage.invalidateAccount('one')
   const result = await usage.getUsage(input)
   assert.equal(result.localUsage.status, 'error')
   assert.match(result.localUsage.warning, /磁盘错误/)
   assert.equal(result.subscription.windows[0].id, 'secondary')
+  assert.match(result.notice, /暂不可用/)
 })
 
 test('cancelled OAuth exchange cannot save a late response', async () => {

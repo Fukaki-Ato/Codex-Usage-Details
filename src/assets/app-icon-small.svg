@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none">
+  <title>Codex Usage Details — small icon</title>
+  <desc>Pixel-aligned small-size edition of the stepped C icon.</desc>
+  <rect x="1" y="1" width="30" height="30" rx="6.5" fill="#142239"/>
+  <path d="M24 7H15C10 7 7 10 7 15V17C7 22 10 25 15 25H25V21H15C12 21 11 20 11 17V15C11 12 12 11 15 11H24V7Z" fill="#6CE3C5"/>
+</svg>
